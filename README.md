@@ -1,6 +1,6 @@
 # Map Visualizer for Open WebUI
 
-Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, opacity sliders, a basemap gallery, click-to-identify popups, 3D terrain, a globe view and PNG export.
+Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, opacity and style controls, a basemap gallery, click-to-identify popups, open building footprints, 3D terrain, a globe view, PNG export and a pop-out window.
 
 No API keys are needed. The default basemap is OpenStreetMap.
 
@@ -8,14 +8,16 @@ No API keys are needed. The default basemap is OpenStreetMap.
 
 | Feature | Detail |
 | --- | --- |
-| Many layer types | XYZ tiles, WMS, WMTS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, Cloud Optimized GeoTIFF, georeferenced images, 3D buildings |
+| Many layer types | XYZ tiles, WMS, WMTS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, Cloud Optimized GeoTIFF, georeferenced images, building footprints |
 | Layer panel | Show or hide, opacity, zoom to layer, legends (generated or from WMS `GetLegendGraphic`), per-layer error messages |
-| Vector styling | Colour, outline, labels, extrusion, filters, and `colorBy` classification (graduated or categorical) with automatic legend |
+| Vector styling | The model sets colour, outline, labels, extrusion, filters, and `colorBy` classification (graduated or categorical) with automatic legend |
+| Style editor | Users can change a layer's colour, outline colour, line width and point size in the panel (the sliders button on each layer) |
+| Building footprints | Open data, no keys: OpenStreetMap buildings (OpenFreeMap) or [Overture Maps](https://overturemaps.org/) buildings (latest release, found automatically), as flat 2D footprints or extruded 3D |
 | Click to identify | Feature attributes for vector layers, `GetFeatureInfo` for WMS layers |
 | Basemaps | 23 keyless options (OpenStreetMap, Esri, OpenFreeMap, USGS, NASA GIBS, PDOK) or any XYZ template or MapLibre style URL |
 | 3D | Globe projection, terrain from open elevation tiles, extruded buildings, pitch and bearing |
 | `inspect_ogc_service` | Reads WMS, WFS, WMTS and OGC API Features capabilities so the model uses real layer names instead of guessing |
-| Export | Save the current view as PNG |
+| Export and pop-out | Save the current view as PNG, or open the map full-window in a new tab at the current view (downloads a standalone HTML file if popups are blocked) |
 | Theme aware | Follows Open WebUI's dark or light theme (see setup) |
 
 ## Setup
@@ -45,7 +47,7 @@ Every layer accepts `name`, `type`, `visible` (default true), `opacity` (0 to 1)
 | `pmtiles` | `url` to a `.pmtiles` archive, vector or raster; `sourceLayer` optional |
 | `cog` | `url` to a Cloud Optimized GeoTIFF, `rescale` (`"min,max"`), `colormap`, `bidx` (for example `[1,2,3]`), `nodata`, `expression`, `titiler` (override the endpoint) |
 | `image` | `url` plus `coordinates` (`[[TL],[TR],[BR],[BL]]`) or `bounds` |
-| `buildings` | 3D OpenStreetMap buildings from OpenFreeMap; no `url` needed. Appears from zoom 13 and tilts the camera if you did not set a pitch |
+| `buildings` | Open building footprints; no `url` needed. `source`: `openfreemap` (OpenStreetMap, default) or `overture` (Overture Maps; the latest release is looked up from the Overture STAC catalogue, or pin one with `release`). `mode`: `3d` (extruded by height, default; tilts the camera if you did not set a pitch) or `2d` (flat footprints). Type `footprints` is shorthand for 2D. Appears from zoom 13 (`minzoom`); click a building for its attributes |
 
 `wfs` and `ogcapi` load the whole result once by default. Set `strategy: "bbox"` for large datasets: the tool then reloads for the current view whenever the map moves (WFS only above `loadMinzoom`).
 
@@ -203,6 +205,7 @@ Pass `height` (240 to 1200) or change `default_height`. Narrow chat windows coll
 - "Map the windmills from the pygeoapi demo and colour them by type."
 - "Plot these five offices on a map, label them and give each a colour by region." (paste the coordinates)
 - "Show 3D buildings in central Amsterdam with terrain on."
+- "Show Overture building footprints around Westminster on aerial imagery."
 - "Look at this WFS, tell me what layers it has and map the largest one: `<url>`"
 - "Show this Cloud Optimized GeoTIFF with a viridis colour map, rescaled 0 to 255: `<url>`"
 
@@ -212,5 +215,5 @@ Complete, tested `show_map` arguments are in [`examples/`](examples/).
 
 - [Classic298's Inline Visualizer](https://github.com/Classic298/open-webui-plugins/tree/main/inline-visualizer-v2) showed how to render rich inline content in Open WebUI, and this README follows its structure.
 - [Qiusheng Wu](https://github.com/giswqs) and the OpenGeos community: the layer vocabulary and tool design draw on [leafmap](https://github.com/opengeos/leafmap) (its `maplibregl` API), [GeoAgent](https://github.com/opengeos/GeoAgent) (map tools for agents), [GeoLibre](https://github.com/opengeos/GeoLibre), [maplibre-gl-layer-control](https://github.com/opengeos/maplibre-gl-layer-control) and [maplibre-gl-basemap-control](https://github.com/opengeos/maplibre-gl-basemap-control).
-- [MapLibre GL JS](https://maplibre.org/), [PMTiles](https://github.com/protomaps/PMTiles), [TiTiler](https://github.com/developmentseed/titiler) and [OpenFreeMap](https://openfreemap.org/).
+- [MapLibre GL JS](https://maplibre.org/), [PMTiles](https://github.com/protomaps/PMTiles), [TiTiler](https://github.com/developmentseed/titiler), [OpenFreeMap](https://openfreemap.org/) and [Overture Maps](https://docs.overturemaps.org/attribution) (building footprints © OpenStreetMap and Overture Maps Foundation).
 - The basemap providers listed above. Check each provider's terms and attribution requirements.
