@@ -1,0 +1,18 @@
+{
+  "title": "Windmills in the Netherlands (OGC API Features)",
+  "basemap": "OpenFreeMap.Positron",
+  "layers": [
+    {
+      "type": "ogcapi",
+      "name": "Windmills",
+      "url": "https://demo.pygeoapi.io/master/collections/dutch_windmills",
+      "limit": 1000,
+      "style": {
+        "radius": 8,
+        "label": "PLAATS",
+        "colorBy": { "field": "TYPE", "type": "categorical", "title": "Mill type" }
+      },
+      "popup": ["NAAM", "PLAATS", "TYPE", "FUNCTIE", "STAAT"]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "title": "Florence from a PMTiles archive",
+  "basemap": "None",
+  "layers": [
+    {
+      "type": "pmtiles",
+      "name": "Protomaps extract (Florence)",
+      "url": "https://pmtiles.io/protomaps(vector)ODbL_firenze.pmtiles",
+      "sourceLayer": ["earth", "water", "roads", "buildings"],
+      "attribution": "OpenStreetMap contributors (ODbL), Protomaps",
+      "style": { "width": 1 }
+    }
+  ],
+  "center": [11.2558, 43.7696],
+  "zoom": 13.5
+}

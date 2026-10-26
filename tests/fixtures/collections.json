@@ -1,0 +1,5 @@
+{"collections": [
+  {"id": "lakes", "title": "Lakes", "description": "Water bodies", "extent": {"spatial": {"bbox": [[3.0, 50.0, 7.0, 54.0]]}}},
+  {"id": "rivers", "title": "Rivers"},
+  {"id": "roads", "title": "Roads", "description": "Streets"}
+]}

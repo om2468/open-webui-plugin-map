@@ -1,0 +1,15 @@
+{
+  "title": "Derna, Libya, 1 July 2023 (Cloud Optimized GeoTIFF)",
+  "basemap": "Esri.WorldImagery",
+  "layers": [
+    {
+      "type": "cog",
+      "name": "Derna imagery",
+      "url": "https://github.com/opengeos/data/releases/download/raster/Libya-2023-07-01.tif",
+      "bidx": [1, 2, 3],
+      "bounds": [22.5995, 32.7513, 22.6571, 32.7984]
+    }
+  ],
+  "center": [22.628, 32.775],
+  "zoom": 13
+}

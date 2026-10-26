@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wfs:WFS_Capabilities version="2.0.0" xmlns:wfs="http://www.opengis.net/wfs/2.0"
+    xmlns:ows="http://www.opengis.net/ows/1.1">
+  <ows:ServiceIdentification><ows:Title>Test WFS</ows:Title></ows:ServiceIdentification>
+  <ows:OperationsMetadata>
+    <ows:Operation name="GetFeature">
+      <ows:Parameter name="outputFormat">
+        <ows:AllowedValues>
+          <ows:Value>application/gml+xml; version=3.2</ows:Value>
+          <ows:Value>application/json</ows:Value>
+        </ows:AllowedValues>
+      </ows:Parameter>
+    </ows:Operation>
+  </ows:OperationsMetadata>
+  <wfs:FeatureTypeList>
+    <wfs:FeatureType>
+      <wfs:Name>ns:buildings</wfs:Name><wfs:Title>Buildings</wfs:Title>
+      <wfs:Abstract>Building footprints</wfs:Abstract>
+      <wfs:DefaultCRS>urn:ogc:def:crs:EPSG::28992</wfs:DefaultCRS>
+      <ows:WGS84BoundingBox>
+        <ows:LowerCorner>3.3 50.7</ows:LowerCorner><ows:UpperCorner>7.2 53.6</ows:UpperCorner>
+      </ows:WGS84BoundingBox>
+    </wfs:FeatureType>
+    <wfs:FeatureType>
+      <wfs:Name>ns:lakes</wfs:Name><wfs:Title>Lakes</wfs:Title>
+    </wfs:FeatureType>
+  </wfs:FeatureTypeList>
+</wfs:WFS_Capabilities>

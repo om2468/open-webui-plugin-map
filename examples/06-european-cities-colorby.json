@@ -1,0 +1,33 @@
+{
+  "title": "European cities by population (inline GeoJSON)",
+  "basemap": "OpenFreeMap.Positron",
+  "layers": [
+    {
+      "type": "geojson",
+      "name": "Cities (approximate population, millions)",
+      "data": {
+        "type": "FeatureCollection",
+        "features": [
+          { "type": "Feature", "properties": { "name": "London", "population_m": 8.8 }, "geometry": { "type": "Point", "coordinates": [-0.1276, 51.5072] } },
+          { "type": "Feature", "properties": { "name": "Berlin", "population_m": 3.7 }, "geometry": { "type": "Point", "coordinates": [13.405, 52.52] } },
+          { "type": "Feature", "properties": { "name": "Madrid", "population_m": 3.3 }, "geometry": { "type": "Point", "coordinates": [-3.7038, 40.4168] } },
+          { "type": "Feature", "properties": { "name": "Rome", "population_m": 2.8 }, "geometry": { "type": "Point", "coordinates": [12.4964, 41.9028] } },
+          { "type": "Feature", "properties": { "name": "Paris", "population_m": 2.1 }, "geometry": { "type": "Point", "coordinates": [2.3522, 48.8566] } },
+          { "type": "Feature", "properties": { "name": "Vienna", "population_m": 2.0 }, "geometry": { "type": "Point", "coordinates": [16.3738, 48.2082] } },
+          { "type": "Feature", "properties": { "name": "Warsaw", "population_m": 1.8 }, "geometry": { "type": "Point", "coordinates": [21.0122, 52.2297] } },
+          { "type": "Feature", "properties": { "name": "Budapest", "population_m": 1.7 }, "geometry": { "type": "Point", "coordinates": [19.0402, 47.4979] } },
+          { "type": "Feature", "properties": { "name": "Barcelona", "population_m": 1.6 }, "geometry": { "type": "Point", "coordinates": [2.1734, 41.3851] } },
+          { "type": "Feature", "properties": { "name": "Amsterdam", "population_m": 0.9 }, "geometry": { "type": "Point", "coordinates": [4.9041, 52.3676] } },
+          { "type": "Feature", "properties": { "name": "Oslo", "population_m": 0.7 }, "geometry": { "type": "Point", "coordinates": [10.7522, 59.9139] } },
+          { "type": "Feature", "properties": { "name": "Lisbon", "population_m": 0.55 }, "geometry": { "type": "Point", "coordinates": [-9.1393, 38.7223] } }
+        ]
+      },
+      "style": {
+        "radius": 11,
+        "label": "name",
+        "colorBy": { "field": "population_m", "type": "graduated", "classes": 4, "colormap": "YlOrRd", "title": "Population (millions)" }
+      },
+      "popup": ["name", "population_m"]
+    }
+  ]
+}

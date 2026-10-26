@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Capabilities version="1.0.0" xmlns="http://www.opengis.net/wmts/1.0"
+    xmlns:ows="http://www.opengis.net/ows/1.1">
+  <Contents>
+    <Layer>
+      <ows:Title>Aerial</ows:Title><ows:Identifier>aerial</ows:Identifier>
+      <Style isDefault="true"><ows:Identifier>default</ows:Identifier></Style>
+      <Format>image/jpeg</Format>
+      <TileMatrixSetLink><TileMatrixSet>GoogleMapsCompatible</TileMatrixSet></TileMatrixSetLink>
+      <ResourceURL format="image/jpeg" resourceType="tile" template="https://t.example.com/aerial/{TileMatrixSet}/{TileMatrix}/{TileCol}/{TileRow}.jpeg"/>
+    </Layer>
+    <Layer>
+      <ows:Title>Prefixed</ows:Title><ows:Identifier>prefixed</ows:Identifier>
+      <TileMatrixSetLink><TileMatrixSet>EPSG:3857</TileMatrixSet></TileMatrixSetLink>
+      <TileMatrixSetLink><TileMatrixSet>EPSG:28992</TileMatrixSet></TileMatrixSetLink>
+    </Layer>
+    <Layer>
+      <ows:Title>Padded</ows:Title><ows:Identifier>padded</ows:Identifier>
+      <TileMatrixSetLink><TileMatrixSet>Padded3857</TileMatrixSet></TileMatrixSetLink>
+    </Layer>
+    <TileMatrixSet>
+      <ows:Identifier>GoogleMapsCompatible</ows:Identifier>
+      <ows:SupportedCRS>urn:ogc:def:crs:EPSG::3857</ows:SupportedCRS>
+      <TileMatrix><ows:Identifier>0</ows:Identifier></TileMatrix>
+      <TileMatrix><ows:Identifier>1</ows:Identifier></TileMatrix>
+    </TileMatrixSet>
+    <TileMatrixSet>
+      <ows:Identifier>EPSG:3857</ows:Identifier>
+      <ows:SupportedCRS>urn:ogc:def:crs:EPSG::3857</ows:SupportedCRS>
+      <TileMatrix><ows:Identifier>EPSG:3857:0</ows:Identifier></TileMatrix>
+    </TileMatrixSet>
+    <TileMatrixSet>
+      <ows:Identifier>EPSG:28992</ows:Identifier>
+      <ows:SupportedCRS>urn:ogc:def:crs:EPSG::28992</ows:SupportedCRS>
+      <TileMatrix><ows:Identifier>00</ows:Identifier></TileMatrix>
+    </TileMatrixSet>
+    <TileMatrixSet>
+      <ows:Identifier>Padded3857</ows:Identifier>
+      <ows:SupportedCRS>urn:ogc:def:crs:EPSG::3857</ows:SupportedCRS>
+      <TileMatrix><ows:Identifier>00</ows:Identifier></TileMatrix>
+    </TileMatrixSet>
+  </Contents>
+</Capabilities>

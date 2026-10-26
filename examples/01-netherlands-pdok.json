@@ -1,0 +1,25 @@
+{
+  "title": "Dutch administrative areas (PDOK)",
+  "basemap": "PDOK.BRT",
+  "layers": [
+    {
+      "type": "wms",
+      "name": "Provinces (CBS WMS)",
+      "url": "https://service.pdok.nl/cbs/gebiedsindelingen/2023/wms/v1_0",
+      "layers": "provincie_gegeneraliseerd",
+      "opacity": 0.6
+    },
+    {
+      "type": "wfs",
+      "name": "Municipalities (CBS WFS)",
+      "url": "https://service.pdok.nl/cbs/gebiedsindelingen/2023/wfs/v1_0",
+      "typeName": "gebiedsindelingen:gemeente_gegeneraliseerd",
+      "maxFeatures": 400,
+      "style": { "color": "#b91c1c", "fillOpacity": 0.05, "width": 1, "label": "statnaam", "labelSize": 10 },
+      "popup": ["statnaam", "statcode"],
+      "visible": false
+    }
+  ],
+  "center": [5.3, 52.15],
+  "zoom": 7
+}

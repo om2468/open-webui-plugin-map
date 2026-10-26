@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WMS_Capabilities version="1.3.0" xmlns="http://www.opengis.net/wms">
+  <Service><Name>WMS</Name><Title>Test WMS</Title></Service>
+  <Capability>
+    <Request>
+      <GetMap><Format>image/png</Format><Format>image/jpeg</Format></GetMap>
+      <GetFeatureInfo><Format>application/json</Format><Format>text/html</Format></GetFeatureInfo>
+    </Request>
+    <Layer>
+      <Title>Root</Title>
+      <CRS>EPSG:4326</CRS>
+      <CRS>EPSG:3857</CRS>
+      <Layer queryable="1">
+        <Name>roads</Name><Title>Road Network</Title><Abstract>All the roads</Abstract>
+        <EX_GeographicBoundingBox>
+          <westBoundLongitude>3.1234567</westBoundLongitude><eastBoundLongitude>7.2</eastBoundLongitude>
+          <southBoundLatitude>50.5</southBoundLatitude><northBoundLatitude>53.7</northBoundLatitude>
+        </EX_GeographicBoundingBox>
+        <Style><Name>default</Name></Style>
+        <Style><Name>dark</Name></Style>
+      </Layer>
+      <Layer>
+        <Title>Group</Title>
+        <Layer><Name>rivers</Name><Title>Rivers</Title></Layer>
+      </Layer>
+    </Layer>
+    <Layer>
+      <Name>no3857</Name><Title>Only 4326</Title><CRS>EPSG:4326</CRS>
+    </Layer>
+  </Capability>
+</WMS_Capabilities>

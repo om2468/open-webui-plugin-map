@@ -1,0 +1,216 @@
+# Map Visualizer for Open WebUI
+
+Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, opacity sliders, a basemap gallery, click-to-identify popups, 3D terrain, a globe view and PNG export.
+
+No API keys are needed. The default basemap is OpenStreetMap.
+
+## What it does
+
+| Feature | Detail |
+| --- | --- |
+| Many layer types | XYZ tiles, WMS, WMTS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, Cloud Optimized GeoTIFF, georeferenced images, 3D buildings |
+| Layer panel | Show or hide, opacity, zoom to layer, legends (generated or from WMS `GetLegendGraphic`), per-layer error messages |
+| Vector styling | Colour, outline, labels, extrusion, filters, and `colorBy` classification (graduated or categorical) with automatic legend |
+| Click to identify | Feature attributes for vector layers, `GetFeatureInfo` for WMS layers |
+| Basemaps | 23 keyless options (OpenStreetMap, Esri, OpenFreeMap, USGS, NASA GIBS, PDOK) or any XYZ template or MapLibre style URL |
+| 3D | Globe projection, terrain from open elevation tiles, extruded buildings, pitch and bearing |
+| `inspect_ogc_service` | Reads WMS, WFS, WMTS and OGC API Features capabilities so the model uses real layer names instead of guessing |
+| Export | Save the current view as PNG |
+| Theme aware | Follows Open WebUI's dark or light theme (see setup) |
+
+## Setup
+
+1. In Open WebUI go to Workspace, then Tools, then **+ Create**.
+2. Paste the contents of [`tool.py`](tool.py) and click **Save**.
+3. Open the model you want to use (Workspace, then Models, then edit) and enable **Map Visualizer** under Tools.
+4. Start a chat and ask for a map (see [example prompts](#example-prompts)).
+
+Native (function) calling works and is recommended, because the layer spec is passed as a structured argument. Models need to be reasonably good at tool calls and JSON; small models tend to guess layer names, which `inspect_ogc_service` is there to prevent.
+
+No Same-Origin setting is required. If you turn on **iframe Sandbox Allow Same Origin** (Settings, then Interface), the map can read Open WebUI's theme and follows its dark or light mode. Without it the map follows your operating system's setting instead.
+
+## Layer types
+
+Every layer accepts `name`, `type`, `visible` (default true), `opacity` (0 to 1), `minzoom`, `maxzoom`, `attribution`, `fit` (true zooms to this layer, false excludes it from auto-fit) and `bounds` `[west, south, east, north]`. Coordinates are always `[longitude, latitude]`. If `type` is omitted or is a common alias (`tiles`, `geotiff`, `features`, `mvt` and so on) the tool infers it from the URL and keys.
+
+| Type | Key options |
+| --- | --- |
+| `xyz` | `url` or `tiles` with `{z}/{x}/{y}` (`{s}` or `{a-c}` subdomains work), `tileSize`, `scheme: "tms"`, `sourceMaxzoom` |
+| `wms` | `url`, `layers`, `styles`, `format`, `transparent`, `version` (1.3.0), `params` (extra GetMap parameters such as `TIME`), `queryable`, `infoFormat`, `queryLayers`, `legend`, `legendUrl` |
+| `wmts` | `url` as a REST template (`{TileMatrix}/{TileRow}/{TileCol}`, or `{z}/{y}/{x}`) or a KVP endpoint with `layer`, `tileMatrixSet`, `styleName`, `format`, plus `matrixPrefix`, `time`, `dimensions` |
+| `wfs` | `url`, `typeName`, `version` (2.0.0), `maxFeatures` (2000), `cqlFilter`, `outputFormat`, `srsName`, `axisOrder` (`auto`, `lonlat`, `latlon`), `strategy: "bbox"`, `loadMinzoom` (10) |
+| `ogcapi` | `url` to a `/collections/{id}` or `/items` endpoint (or the API root plus `collection`), `limit` (1000), `strategy: "bbox"`, `params` |
+| `geojson` | `data` (inline FeatureCollection, Feature or geometry) or `url` |
+| `vectortiles` | `url` (TileJSON) or `tiles` template with `sourceLayer` (required for templates, optional for TileJSON), `sourceMaxzoom` |
+| `pmtiles` | `url` to a `.pmtiles` archive, vector or raster; `sourceLayer` optional |
+| `cog` | `url` to a Cloud Optimized GeoTIFF, `rescale` (`"min,max"`), `colormap`, `bidx` (for example `[1,2,3]`), `nodata`, `expression`, `titiler` (override the endpoint) |
+| `image` | `url` plus `coordinates` (`[[TL],[TR],[BR],[BL]]`) or `bounds` |
+| `buildings` | 3D OpenStreetMap buildings from OpenFreeMap; no `url` needed. Appears from zoom 13 and tilts the camera if you did not set a pitch |
+
+`wfs` and `ogcapi` load the whole result once by default. Set `strategy: "bbox"` for large datasets: the tool then reloads for the current view whenever the map moves (WFS only above `loadMinzoom`).
+
+### Vector styling
+
+Applies to `geojson`, `wfs`, `ogcapi`, `vectortiles` and `pmtiles`. Put these in a layer's `style` object.
+
+| Key | Meaning |
+| --- | --- |
+| `color` | Base colour for the layer. Layers get distinct default colours otherwise |
+| `fillColor`, `fillOpacity`, `strokeColor`, `width`, `outlineWidth`, `dash` | Polygon fill and outline, line width and dash array such as `[2,2]` |
+| `radius`, `strokeWidth`, `pointOpacity` | Point size and outline |
+| `label`, `labelSize`, `labelColor`, `labelHalo` | Label each feature with a property |
+| `extrude`, `extrudeScale` | Extrude polygons by a property name or a fixed height in metres |
+| `filter` | A MapLibre filter expression |
+| `colorBy` | Data-driven colour, below |
+
+`colorBy` takes a field name or an object:
+
+| Key | Meaning |
+| --- | --- |
+| `field` | Property to classify (required) |
+| `type` | `graduated` (default for numeric fields, or when `breaks` is given) or `categorical` |
+| `scheme`, `classes` | Graduated classing: `quantile` (default) or `equal`, and 2 to 9 classes (default 5) |
+| `breaks` | Explicit class breaks, for example `[10, 50, 200]` |
+| `colormap` | `viridis`, `plasma`, `magma`, `inferno`, `cividis`, `YlOrRd`, `YlGnBu`, `YlGn`, `Blues`, `Greens`, `Reds`, `Oranges`, `Purples`, `Greys`, `RdYlGn`, `RdYlBu`, `RdBu`, `Spectral`, `terrain`. Add `_r` to reverse |
+| `colors` | Your own colour list (graduated needs one more colour than breaks) |
+| `mapping`, `categories` | Categorical: explicit value to colour map, or a list of values to colour in order (up to 24 categories are coloured, others grey) |
+| `title` | Legend title |
+
+`popup` controls click-to-identify: `true` (all attributes, default), `false`, or a list of field names.
+
+Server-side checks reject layers that have no URL, use non-http(s) URLs or are not on the allowlist, and report them back to the model so it can correct itself.
+
+## Basemaps
+
+Set with `basemap`, or change in the panel. Names are case-insensitive. You can also pass any XYZ template (containing `{z}`) or a MapLibre style URL.
+
+| Provider | Basemaps |
+| --- | --- |
+| OpenStreetMap | `OpenStreetMap` (default), `OpenStreetMap.HOT`, `OpenTopoMap`, `CyclOSM` |
+| Esri | `Esri.WorldImagery`, `Esri.Hybrid` (imagery plus labels), `Esri.WorldTopoMap`, `Esri.WorldStreetMap`, `Esri.WorldGrayCanvas`, `Esri.WorldShadedRelief`, `Esri.OceanBasemap` |
+| OpenFreeMap (vector) | `OpenFreeMap.Liberty`, `.Bright`, `.Positron`, `.Dark`, `.Fiord` |
+| Agencies | `USGS.USImagery`, `USGS.USTopo`, `NASAGIBS.BlueMarble`, `NASAGIBS.EarthAtNight`, `PDOK.BRT` and `PDOK.Luchtfoto` (Netherlands only) |
+| Other | `None` (blank background) |
+
+Please respect each provider's usage policy. The public OpenStreetMap tile servers in particular are not meant for heavy traffic.
+
+## Valves
+
+Set by an admin under Workspace, then Tools, then the gear icon on Map Visualizer.
+
+| Valve | Default | Purpose |
+| --- | --- | --- |
+| `network_policy` | `open` | `open` lets the map load from any host. `allowlist` restricts the map (by CSP) and the server-side checks to `allowed_hosts` |
+| `allowed_hosts` | Built-in basemap hosts, `unpkg.com`, `titiler.xyz`, terrain host | Comma-separated hosts for `allowlist`; wildcards such as `*.example.com` work |
+| `default_basemap` | `OpenStreetMap` | Basemap used when the model does not choose one |
+| `default_height` | `520` | Map height in pixels (requests are clamped to 240 to 1200) |
+| `maplibre_js_url` | `https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js` | MapLibre GL JS (5.x UMD build) |
+| `maplibre_css_url` | `https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css` | MapLibre GL CSS |
+| `pmtiles_js_url` | `https://unpkg.com/pmtiles@4.4.1/dist/pmtiles.js` | PMTiles library, loaded only for maps that use PMTiles |
+| `titiler_endpoint` | `https://titiler.xyz` | TiTiler server used to tile COG layers |
+| `terrain_tiles` | AWS open Terrarium elevation tiles | Elevation tiles for 3D terrain |
+| `glyphs_url` | OpenFreeMap font PBFs | Glyphs (fonts) for labels on raster basemaps |
+| `label_font` | `Noto Sans Regular` | Font stack name; must exist at `glyphs_url` |
+| `allow_private_networks` | `false` | Let `inspect_ogc_service` reach private or internal addresses |
+| `request_timeout` | `20` | Timeout in seconds for `inspect_ogc_service` |
+
+## Security model
+
+The map runs inside Open WebUI's sandboxed iframe with a Content Security Policy (CSP) set by the tool.
+
+| Level | CSP | Trade-off |
+| --- | --- | --- |
+| `open` (default) | Blocks plugins, forms and `<base>`; does not restrict where scripts, images or data requests go | Any WMS, WFS, tile or GeoJSON host works. The cost is that a map can make requests to any host. A prompt-injected or malicious spec could encode chat data into a URL (for example an image or tile URL) and send it out. Only use this where you trust the model's inputs and your users |
+| `allowlist` | `default-src 'self'` plus script, style, image, connect and font sources limited to `allowed_hosts` and the hosts in your MapLibre, PMTiles and TiTiler valves | Exfiltration to other hosts is blocked by the browser. You must list every service your users need. Layers and basemaps on unlisted hosts are rejected before the map is drawn, and `inspect_ogc_service` refuses unlisted hosts |
+
+In both modes the page loads MapLibre from the URL in the valves, which is third-party code unless you self-host it (below).
+
+**`inspect_ogc_service` and SSRF.** This is the only part that makes requests from your server. It accepts only absolute http(s) URLs, resolves the host and refuses anything that is not a public address (loopback, link-local, private ranges), re-checks every redirect, and caps the response at 8 MB. Set `allow_private_networks` only if you need to inspect services on your internal network, and understand that this lets the model, and so anyone who can prompt it, make the Open WebUI server fetch internal URLs.
+
+### Self-hosting MapLibre (air-gapped installs)
+
+1. Download these files:
+   - `maplibre-gl.js` and `maplibre-gl.css` from `https://unpkg.com/maplibre-gl@5.24.0/dist/`
+   - `pmtiles.js` from `https://unpkg.com/pmtiles@4.4.1/dist/` (only if you use PMTiles)
+2. Put them in Open WebUI's static directory, for example `backend/open_webui/static/maplibre/` (in the Docker image: `/app/backend/open_webui/static/maplibre/`). They are then served at `/static/maplibre/...`.
+3. Set the valves:
+   - `maplibre_js_url` to `/static/maplibre/maplibre-gl.js`
+   - `maplibre_css_url` to `/static/maplibre/maplibre-gl.css`
+   - `pmtiles_js_url` to `/static/maplibre/pmtiles.js`
+4. Set `network_policy` to `allowlist` and list your internal tile, WMS and WFS hosts in `allowed_hosts`. Set `default_basemap` to your own tile URL or style URL, and point `glyphs_url`, `terrain_tiles` and `titiler_endpoint` at internal servers if you use labels, terrain or COGs.
+
+Relative URLs resolve against the Open WebUI origin.
+
+## Limitations
+
+- WMS and WMTS layers must be available in EPSG:3857 (Web Mercator). `inspect_ogc_service` shows this per layer.
+- WMTS tile matrix ids must be plain zoom numbers, optionally with a prefix (`0`, `1`, `2` or `EPSG:3857:0`, `EPSG:3857:1`). Zero-padded ids such as `00` and `01` are not supported; use the service's WMS instead.
+- Services need to send CORS headers (`Access-Control-Allow-Origin`) because the browser fetches them directly. If a layer shows a red error or tile failures, this is the usual cause.
+- WFS layers need GeoJSON output (`application/json`). Services that only offer GML will not work.
+- WMS `GetFeatureInfo` on click assumes the map is not rotated or pitched.
+- COG layers go through the public `titiler.xyz` demo server by default, which is rate-limited and not for production use. Run your own TiTiler and set `titiler_endpoint` for anything serious. The COG itself must be reachable by that server and send CORS headers.
+- One `show_map` call draws one new map. To change a map, the model calls it again with the full updated spec.
+- Large vector datasets are slow. Use `strategy: "bbox"`, `maxFeatures` or vector tiles.
+
+## Troubleshooting
+
+<details>
+<summary>The map area is blank or says it could not load MapLibre GL</summary>
+
+The browser could not fetch the script from `maplibre_js_url`. Check that the host is reachable from the user's browser (not just the server), that a firewall or ad blocker is not blocking `unpkg.com`, or self-host the files. In `allowlist` mode the valve hosts are added to the CSP automatically.
+</details>
+
+<details>
+<summary>A layer shows a red error or "Some tiles failed to load"</summary>
+
+Open the layer panel. HTTP 400 or a service exception usually means a wrong layer name, so ask the model to call `inspect_ogc_service` and retry. A network or CORS message means the server does not allow browser access. A WMS layer without EPSG:3857 or a WFS without JSON output cannot be shown.
+</details>
+
+<details>
+<summary>The model keeps inventing layer names</summary>
+
+Tell it to use `inspect_ogc_service` first, or enable the tool for a more capable model. Passing `search` narrows large capabilities documents.
+</details>
+
+<details>
+<summary>The model says a layer was rejected</summary>
+
+The tool returns a list of rejected layers. Typical reasons: missing `url`, an unknown `type`, a non-http(s) URL, or in `allowlist` mode a host that is not in `allowed_hosts`.
+</details>
+
+<details>
+<summary>The map is light while Open WebUI is dark (or the reverse)</summary>
+
+Without "iframe Sandbox Allow Same Origin" the map follows the operating system's colour scheme, not Open WebUI's theme. Enable that setting if you want them to match.
+</details>
+
+<details>
+<summary>inspect_ogc_service says a host resolves to a non-public address</summary>
+
+This is the SSRF guard. Enable `allow_private_networks` only if you intend the tool to reach internal services.
+</details>
+
+<details>
+<summary>The map is the wrong height or cut off</summary>
+
+Pass `height` (240 to 1200) or change `default_height`. Narrow chat windows collapse the layer panel automatically; click its header to open it.
+</details>
+
+## Example prompts
+
+- "Show me a map of the Dutch provinces from the PDOK CBS WMS on the PDOK background map."
+- "Find a NASA GIBS layer for night lights and show it on a globe."
+- "Map the windmills from the pygeoapi demo and colour them by type."
+- "Plot these five offices on a map, label them and give each a colour by region." (paste the coordinates)
+- "Show 3D buildings in central Amsterdam with terrain on."
+- "Look at this WFS, tell me what layers it has and map the largest one: `<url>`"
+- "Show this Cloud Optimized GeoTIFF with a viridis colour map, rescaled 0 to 255: `<url>`"
+
+Complete, tested `show_map` arguments are in [`examples/`](examples/).
+
+## Acknowledgements
+
+- [Classic298's Inline Visualizer](https://github.com/Classic298/open-webui-plugins/tree/main/inline-visualizer-v2) showed how to render rich inline content in Open WebUI, and this README follows its structure.
+- [Qiusheng Wu](https://github.com/giswqs) and the OpenGeos community: the layer vocabulary and tool design draw on [leafmap](https://github.com/opengeos/leafmap) (its `maplibregl` API), [GeoAgent](https://github.com/opengeos/GeoAgent) (map tools for agents), [GeoLibre](https://github.com/opengeos/GeoLibre), [maplibre-gl-layer-control](https://github.com/opengeos/maplibre-gl-layer-control) and [maplibre-gl-basemap-control](https://github.com/opengeos/maplibre-gl-basemap-control).
+- [MapLibre GL JS](https://maplibre.org/), [PMTiles](https://github.com/protomaps/PMTiles), [TiTiler](https://github.com/developmentseed/titiler) and [OpenFreeMap](https://openfreemap.org/).
+- The basemap providers listed above. Check each provider's terms and attribution requirements.
