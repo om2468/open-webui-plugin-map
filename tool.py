@@ -850,15 +850,16 @@ var loaders = {
     return srcP.then(function (src) {
       map.addSource(e.key, src);
       var hgt = overture
-        ? ['coalesce', ['get', 'height'], ['*', ['get', 'num_floors'], 3], 8]
+        // guard num_floors: ['*', null, 3] is an evaluation error that coalesce does not catch
+        ? ['coalesce', ['get', 'height'], ['case', ['has', 'num_floors'], ['*', ['to-number', ['get', 'num_floors'], 1], 3], 8]]
         : ['coalesce', ['get', 'render_height'], ['get', 'height'], 8];
       var base = overture ? ['coalesce', ['get', 'min_height'], 0] : ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0];
       var color = (s.colorBy ? colorExpression(e, s, null) : null) || s.color ||
-        (flat ? '#b9a48c' : ['interpolate', ['linear'], hgt, 0, '#d8d4cc', 50, '#b8b0a2', 150, '#8f8576']);
+        (flat ? '#5b7bb4' : ['interpolate', ['linear'], hgt, 0, '#d8d4cc', 50, '#b8b0a2', 150, '#8f8576']);
       var common = { source: e.key, 'source-layer': L.sourceLayer || 'building', minzoom: num(L.minzoom, 13) };
       if (flat) {
         addMl(e, Object.assign({ id: e.key + '-fill', type: 'fill', paint: { 'fill-color': color, 'fill-opacity': num(s.fillOpacity, 0.55) } }, common), ['fill-opacity']);
-        addMl(e, Object.assign({ id: e.key + '-outline', type: 'line', paint: { 'line-color': s.strokeColor || '#7a6650', 'line-width': num(s.width, 0.6) } }, common), ['line-opacity']);
+        addMl(e, Object.assign({ id: e.key + '-outline', type: 'line', paint: { 'line-color': s.strokeColor || '#2f4a80', 'line-width': num(s.width, 0.7) } }, common), ['line-opacity']);
       } else {
         addMl(e, Object.assign({ id: e.key, type: 'fill-extrusion', paint: {
           'fill-extrusion-color': color, 'fill-extrusion-height': hgt, 'fill-extrusion-base': base,
