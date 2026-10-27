@@ -2,17 +2,20 @@
 title: Map Visualizer
 author: om2468
 author_url: https://github.com/om2468
-version: 0.2.0
+version: 0.4.0
 required_open_webui_version: 0.6.0
-description: Renders interactive MapLibre maps inline in chat. The model builds the map from a JSON layer spec (XYZ/WMTS tiles, WMS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, COG, images, 3D buildings) on top of keyless open basemaps. Includes inspect_ogc_service to look up real WMS/WFS/WMTS layer names.
+description: Renders interactive MapLibre maps inline in chat. The model builds the map from a JSON layer spec (XYZ/WMTS tiles, WMS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, COG, images, 3D buildings) on top of keyless open basemaps, updates it incrementally (update_map), can look at the result (look_at_map) and identify features at a location (query_map). Includes inspect_ogc_service to look up real WMS/WFS/WMTS layer names.
 """
 
 import asyncio
 import http.client
 import ipaddress
 import json
+import os
 import re
 import socket
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,7 +25,7 @@ from typing import Literal, Optional
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-_MV_BUILD = "0.2.0"
+_MV_BUILD = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Basemap catalogue: keyless providers only (no API tokens required).
@@ -136,6 +139,157 @@ _TYPE_ALIASES = {
 }
 
 # ---------------------------------------------------------------------------
+# Map store: one record per map per chat, so the model can change a map with
+# update_map instead of resending the whole spec, and look_at_map / describe_map
+# know what is on it. Records are saved as JSON under Open WebUI's data directory.
+# ---------------------------------------------------------------------------
+
+_MAPS_PER_CHAT = 20
+
+
+def _store_dir() -> str:
+    # Inside Open WebUI its env module is already loaded; never import it ourselves, that
+    # bootstraps the whole app (config, migrations) in a plain Python process.
+    import sys
+    env = sys.modules.get("open_webui.env")
+    base = str(getattr(env, "DATA_DIR", "") or os.environ.get("DATA_DIR") or tempfile.gettempdir())
+    return os.path.join(base, "map_visualizer")
+
+
+def _map_id(value) -> Optional[str]:
+    """'m2', 'M2', 'map 2', 2 -> 'm2'."""
+    if value is None:
+        return None
+    s = re.sub(r"[^a-z0-9]", "", str(value).lower())
+    m = re.match(r"^(?:map|m)?(\d+)$", s)
+    return f"m{int(m.group(1))}" if m else None
+
+
+class _MapStore:
+    def __init__(self, directory: Optional[str] = None):
+        self.directory = directory
+        self._chats: dict = {}
+
+    def _path(self, chat_id: str) -> Optional[str]:
+        if not self.directory or not chat_id:
+            return None  # no chat (direct API call, tests): memory only
+        return os.path.join(self.directory, re.sub(r"[^A-Za-z0-9_-]", "_", chat_id)[:80] + ".json")
+
+    def _load(self, chat_id: str) -> dict:
+        if chat_id not in self._chats:
+            data = {"maps": {}, "order": []}
+            path = self._path(chat_id)
+            if path and os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except (OSError, ValueError):
+                    pass
+            self._chats[chat_id] = data
+        return self._chats[chat_id]
+
+    def save(self, chat_id: str) -> None:
+        path = self._path(chat_id)
+        if not path:
+            return
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._chats[chat_id], fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def create(self, chat_id: str, spec: dict) -> dict:
+        data = self._load(chat_id)
+        # ids are never reused within a chat: an evicted map's embed may still be on the page
+        n = data.get("next") or 1 + max([int(k[1:]) for k in data["maps"] if k[1:].isdigit()] or [0])
+        data["next"] = n + 1
+        rec = {"id": f"m{n}", "version": 1, "spec": spec, "updated": time.time(), "look": None}
+        data["maps"][rec["id"]] = rec
+        data["order"].append(rec["id"])
+        while len(data["order"]) > _MAPS_PER_CHAT:
+            data["maps"].pop(data["order"].pop(0), None)
+        self.save(chat_id)
+        return rec
+
+    def get(self, chat_id: str, map_id=None) -> Optional[dict]:
+        data = self._load(chat_id)
+        if map_id:
+            return data["maps"].get(map_id)
+        return data["maps"].get(data["order"][-1]) if data["order"] else None
+
+    def bump(self, chat_id: str, rec: dict) -> None:
+        rec["version"] += 1
+        rec["updated"] = time.time()
+        self.save(chat_id)
+
+
+def _find_layer(layers: list, ref) -> Optional[int]:
+    """Index of the layer the model means: a 1-based index, a name (case-insensitive) or {name|index}."""
+    if isinstance(ref, dict):
+        ref = ref.get("index") if ref.get("index") is not None else ref.get("name")
+    if ref is None:
+        return None
+    if isinstance(ref, bool):
+        return None
+    if isinstance(ref, (int, float)) or (isinstance(ref, str) and ref.strip().isdigit()):
+        i = int(ref) - 1
+        return i if 0 <= i < len(layers) else None
+    key = str(ref).strip().lower()
+    for i, layer in enumerate(layers):
+        if str(layer.get("name", "")).lower() == key:
+            return i
+    for i, layer in enumerate(layers):  # partial match as a fallback
+        if key and key in str(layer.get("name", "")).lower():
+            return i
+    return None
+
+
+def _patch_layers(layers: list, update_layers, remove_layers, add_layers, errors: list) -> list:
+    """Apply update_map's layer changes: updates first, then removals, then additions."""
+    layers = [dict(l) for l in layers]
+    for patch in update_layers or []:
+        if not isinstance(patch, dict):
+            errors.append(f"update_layers entry {patch!r} is not an object.")
+            continue
+        i = _find_layer(layers, patch)
+        if i is None:
+            errors.append(f"update_layers: no layer called {patch.get('name') or patch.get('index')!r}.")
+            continue
+        layer = layers[i]
+        for k, v in patch.items():
+            if k in ("name", "index"):
+                continue
+            if k == "rename":
+                layer["name"] = str(v)
+            elif k == "style" and isinstance(v, dict):
+                layer["style"] = {kk: vv for kk, vv in {**(layer.get("style") or {}), **v}.items() if vv is not None}
+            elif k == "position":
+                try:
+                    pos = max(0, min(len(layers) - 1, int(v) - 1))
+                except (TypeError, ValueError):
+                    errors.append(f"position must be a number (layer {layer.get('name')!r}).")
+                    continue
+                layers.insert(pos, layers.pop(i))
+                i = pos
+                layer = layers[i]
+            elif v is None:
+                layer.pop(k, None)
+            else:
+                layer[k] = v
+    for ref in remove_layers or []:
+        i = _find_layer(layers, ref)
+        if i is None:
+            errors.append(f"remove_layers: no layer called {ref!r}.")
+        else:
+            layers.pop(i)
+    for layer in add_layers or []:
+        layers.append(layer)
+    return layers
+
+# ---------------------------------------------------------------------------
 # Iframe CSS
 # ---------------------------------------------------------------------------
 
@@ -237,6 +391,14 @@ html, body { margin: 0; padding: 0; background: transparent; font-family: var(--
 .mv-bm-opt span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mv-bm-opt:hover { background: var(--mv-hover); }
 .mv-bm-opt.active { border-color: var(--mv-accent); }
+/* legend pane: its own card so WMS legend images show at native size (the panel is too narrow to read them) */
+#mv-legend { position: absolute; right: 10px; bottom: 34px; z-index: 3; max-width: min(400px, calc(100% - 20px));
+  max-height: calc(100% - 120px); display: flex; flex-direction: column; }
+#mv-legend .mv-head { cursor: pointer; }
+#mv-legend .mv-body { overflow: auto; padding: 2px 10px 8px; }
+#mv-legend img { display: block; max-width: none; background: #fff; border-radius: 4px; margin: 4px 0 6px; }
+.mv-lg-title { font-weight: 600; margin: 6px 0 2px; white-space: nowrap; }
+.mv-lg-sub { color: var(--mv-muted); margin-bottom: 2px; }
 #mv-tools { position: absolute; top: 10px; right: 50px; z-index: 3; display: flex; gap: 2px; padding: 3px; }
 #mv-tools .mv-btn { padding: 5px; }
 #mv-tools .mv-btn.on { color: var(--mv-accent); }
@@ -308,6 +470,7 @@ var ICONS = {
   style: '<svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
   draw: '<svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 7l3 3"/></svg>',
   opacity: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>',
+  legend: '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="5" height="5"/><rect x="4" y="13" width="5" height="5"/><path d="M12 6h8M12 15h8"/></svg>',
   grip: '<svg viewBox="0 0 8 14"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>'
 };
 // pop-out copy of this page: fills its own window and starts at the view it was opened from
@@ -1035,55 +1198,71 @@ function propsTable(props, fields) {
 function entryForLayerId(id) {
   for (var i = 0; i < entries.length; i++) if (entries[i].layerIds.indexOf(id) >= 0) return entries[i];
 }
-map.on('click', function (ev) {
-  if (editor) return;  // clicks belong to the feature editor
+// Identify at a screen point: features of the vector layers under it, then GetFeatureInfo on the visible
+// queryable WMS layers. Shared by clicks and by the model's query_map. Returns { box, hits, done }: box is
+// the popup content, hits fills up as answers arrive ([{ layer, type, features: [props] } or { ..., text }]),
+// done resolves when the WMS answers are in. `only` limits it to a set of entry keys.
+function identifyAt(point, only) {
+  function take(e) { return e.visible && (!only || only[e.key]); }
   var ids = [];
-  entries.forEach(function (e) { if (e.visible && e.interactive) ids = ids.concat(e.layerIds.filter(function (id) { return map.getLayer(id); })); });
-  var feats = ids.length ? map.queryRenderedFeatures(ev.point, { layers: ids }) : [];
-  var box = el('div', { 'class': 'mv-pop' });
-  var shown = 0, seenEntry = {};
+  entries.forEach(function (e) { if (take(e) && e.interactive) ids = ids.concat(e.layerIds.filter(function (id) { return map.getLayer(id); })); });
+  var tol = 3, sq = [[point.x - tol, point.y - tol], [point.x + tol, point.y + tol]];
+  var feats = ids.length ? map.queryRenderedFeatures(sq, { layers: ids }) : [];
+  var box = el('div', { 'class': 'mv-pop' }), hits = [], byKey = {}, seen = {};
+  function hit(e) {
+    if (!byKey[e.key]) { byKey[e.key] = { layer: e.name, type: e.type, features: [] }; hits.push(byKey[e.key]); }
+    return byKey[e.key];
+  }
   feats.forEach(function (f) {
     var e = entryForLayerId(f.layer.id);
-    if (!e || shown >= 5) return;
+    if (!e) return;
     var sig = e.key + JSON.stringify(f.properties);
-    if (seenEntry[sig]) return; seenEntry[sig] = 1;
-    shown++;
+    if (seen[sig]) return; seen[sig] = 1;
+    var h = hit(e);
+    if (h.features.length >= 5) return;
+    h.features.push(f.properties || {});
     box.appendChild(el('h4', { text: e.name + (f.sourceLayer && e.type !== 'geojson' ? ' › ' + f.sourceLayer : '') }));
-    var fields = Array.isArray(e.spec.popup) ? e.spec.popup : null;
-    box.appendChild(propsTable(f.properties, fields));
+    box.appendChild(propsTable(f.properties, Array.isArray(e.spec.popup) ? e.spec.popup : null));
   });
-  var wmsHits = entries.filter(function (e) { return e.wms && e.queryable && e.visible; }).reverse();
-  if (!shown && !wmsHits.length) return;
-  if (shown) popup.setLngLat(ev.lngLat).setDOMContent(box).addTo(map);
-  if (!wmsHits.length) return;
+  var wmsHits = entries.filter(function (e) { return e.wms && e.queryable && take(e); }).reverse();
   var b = map.getBounds(), sw = merc(b.getWest(), b.getSouth()), ne = merc(b.getEast(), b.getNorth());
   var cv = map.getCanvas(), W = cv.clientWidth, H = cv.clientHeight;
-  Promise.all(wmsHits.map(function (e) {
+  var done = Promise.all(wmsHits.map(function (e) {
     var w = e.wms, fmt = e.spec.infoFormat || 'application/json';
     var p = { SERVICE: 'WMS', REQUEST: 'GetFeatureInfo', VERSION: w.version, LAYERS: w.layers, QUERY_LAYERS: e.spec.queryLayers || w.layers,
       STYLES: e.spec.styles || '', INFO_FORMAT: fmt, FEATURE_COUNT: 5, WIDTH: W, HEIGHT: H, BBOX: [sw[0], sw[1], ne[0], ne[1]].join(',') };
     p[w.version === '1.3.0' ? 'CRS' : 'SRS'] = 'EPSG:3857';
-    p[w.version === '1.3.0' ? 'I' : 'X'] = Math.round(ev.point.x);
-    p[w.version === '1.3.0' ? 'J' : 'Y'] = Math.round(ev.point.y);
+    p[w.version === '1.3.0' ? 'I' : 'X'] = Math.round(point.x);
+    p[w.version === '1.3.0' ? 'J' : 'Y'] = Math.round(point.y);
     return fetch(withParams(w.url, mergeParams(p, w.params))).then(function (r) { return r.text(); }).then(function (txt) {
       var gj = null;
       try { gj = JSON.parse(txt); } catch (err) {}
       if (gj && gj.features) {
-        if (!gj.features.length) return 0;
+        if (!gj.features.length) return;
+        var h = hit(e);
         box.appendChild(el('h4', { text: e.name }));
-        gj.features.slice(0, 5).forEach(function (f) { box.appendChild(propsTable(f.properties || {}, Array.isArray(e.spec.popup) ? e.spec.popup : null)); });
-        return 1;
+        gj.features.slice(0, 5).forEach(function (f) {
+          h.features.push(f.properties || {});
+          box.appendChild(propsTable(f.properties || {}, Array.isArray(e.spec.popup) ? e.spec.popup : null));
+        });
+        return;
       }
       var plain = txt.replace(/\s+/g, ' ').trim();
-      if (!plain || /ServiceException|no features|^\s*$/i.test(plain) || /<body[^>]*>\s*<\/body>/i.test(txt)) return 0;
+      if (!plain || /ServiceException|no features|^\s*$/i.test(plain) || /<body[^>]*>\s*<\/body>/i.test(txt)) return;
+      hit(e).text = txt.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);  // tags stripped for the model
       box.appendChild(el('h4', { text: e.name }));
       if (/<html|<table/i.test(txt)) { var fr = el('iframe', { sandbox: '' }); fr.srcdoc = txt; box.appendChild(fr); }
       else box.appendChild(el('div', { text: plain.slice(0, 600) }));
-      return 1;
-    }).catch(function () { return 0; });
-  })).then(function (hits) {
-    if (hits.reduce(function (a, b) { return a + b; }, 0) > 0) popup.setLngLat(ev.lngLat).setDOMContent(box).addTo(map);
-  });
+    }).catch(function (err) { hit(e).error = String(err && err.message || err); });
+  }));
+  return { box: box, hits: hits, done: done };
+}
+map.on('click', function (ev) {
+  if (editor) return;  // clicks belong to the feature editor
+  var r = identifyAt(ev.point, null);
+  function show() { if (r.hits.length) popup.setLngLat(ev.lngLat).setDOMContent(r.box).addTo(map); }
+  show();            // vector hits straight away...
+  r.done.then(show); // ...WMS answers when they arrive
 });
 map.on('mousemove', function (ev) {
   var ids = [];
@@ -1307,7 +1486,7 @@ function renderPanel() {
       sec.appendChild(rowEl);
       if (e.error) sec.appendChild(el('div', { 'class': 'mv-err', text: e.error }));
       else if (e.note) sec.appendChild(el('div', { 'class': 'mv-err', style: 'color:var(--mv-muted)', text: e.note }));
-      var det = el('div', { 'class': 'mv-detail' + (openDetails[e.key] || e.legend || e.legendUrl ? ' open' : '') });
+      var det = el('div', { 'class': 'mv-detail' + (openDetails[e.key] ? ' open' : '') });
       if (openDetails[e.key]) {
         var rng = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(e.opacity * 100)), title: 'Opacity',
           oninput: function () { e.opacity = rng.value / 100; applyOpacity(e); } });
@@ -1321,16 +1500,6 @@ function renderPanel() {
           det.appendChild(el('div', { 'class': 'mv-legend-item mv-acts' }, acts));
         }
         if (e.featureCount !== undefined) det.appendChild(el('div', { 'class': 'mv-legend-item', text: e.featureCount + (e.featureCount === 1 ? ' feature' : ' features') }));
-      }
-      if (e.legend) {
-        var lg = el('div', { 'class': 'mv-legend' });
-        if (e.legend.title) lg.appendChild(el('div', { 'class': 'mv-legend-item', style: 'font-weight:600', text: e.legend.title }));
-        e.legend.items.forEach(function (it) { lg.appendChild(el('div', { 'class': 'mv-legend-item' }, [el('span', { 'class': 'mv-sw', style: 'background:' + it.color }), it.label])); });
-        det.appendChild(lg);
-      }
-      if (e.legendUrl) {
-        var img = el('img', { src: e.legendUrl, alt: '', onerror: function () { img.remove(); }, onload: reportHeight });
-        det.appendChild(el('div', { 'class': 'mv-legend' }, [img]));
       }
       if (det.childNodes.length) sec.appendChild(det);
     });
@@ -1359,7 +1528,51 @@ function renderPanel() {
   }
   bsec.appendChild(grid);
   body.appendChild(bsec);
+  renderLegend();
   requestAnimationFrame(reportHeight);
+}
+
+// ---------- UI: legend pane ---------------------------------------------------------------
+// Legends of the visible layers: colour classes from colorBy, and WMS GetLegendGraphic images at
+// their native size, scrolling when they are tall. Open by default on maps big enough to hold it.
+var legendBox = el('div', { id: 'mv-legend', 'class': 'mv-card' });
+legendBox.style.display = 'none';
+wrap.appendChild(legendBox);
+var legendOpen = !(CFG.height < 360 || wrap.clientWidth < 600), legendCollapsed = false, legendBtn = null;
+function hasLegend(e) { return e.visible && (e.legend || e.legendUrl); }
+function renderLegend() {
+  var items = entries.slice().reverse().filter(hasLegend);
+  if (legendBtn) {
+    legendBtn.style.display = items.length ? '' : 'none';
+    legendBtn.classList.toggle('on', legendOpen && items.length > 0);
+  }
+  legendBox.innerHTML = '';
+  if (!items.length || !legendOpen) { legendBox.style.display = 'none'; return; }
+  legendBox.style.display = '';
+  legendBox.appendChild(el('div', { 'class': 'mv-head', onclick: function () { legendCollapsed = !legendCollapsed; renderLegend(); } }, [
+    el('span', { 'class': 'mv-title', text: 'Legend' }),
+    el('span', { 'class': 'mv-btn', html: ICONS.chev, style: legendCollapsed ? 'transform:rotate(-90deg)' : '' })
+  ]));
+  var body = el('div', { 'class': 'mv-body' });
+  if (legendCollapsed) body.style.display = 'none';
+  items.forEach(function (e) {
+    body.appendChild(el('div', { 'class': 'mv-lg-title', text: e.name }));
+    if (e.legend) {
+      if (e.legend.title && e.legend.title !== e.name) body.appendChild(el('div', { 'class': 'mv-lg-sub', text: e.legend.title }));
+      e.legend.items.forEach(function (it) {
+        body.appendChild(el('div', { 'class': 'mv-legend-item' }, [el('span', { 'class': 'mv-sw', style: 'background:' + it.color }), it.label]));
+      });
+    }
+    if (e.legendUrl) {
+      var img = el('img', { src: e.legendUrl, alt: '' });
+      var note = el('div', { 'class': 'mv-lg-sub', text: 'Loading legend…' });
+      img.addEventListener('load', function () { note.remove(); });
+      img.addEventListener('error', function () { img.remove(); note.textContent = 'The server sent no legend'; });
+      body.appendChild(note);
+      body.appendChild(img);
+    }
+  });
+  legendBox.appendChild(body);
 }
 
 // ---------- UI: toolbar ---------------------------------------------------------------
@@ -1371,6 +1584,8 @@ toolBtn(ICONS.home, 'Reset view', function () { fitInitial(true); });
 var globeBtn = toolBtn(ICONS.globe, 'Globe projection', function (b) { globeOn = !globeOn; setGlobe(); b.classList.toggle('on', globeOn); });
 var terrainBtn = toolBtn(ICONS.mountain, '3D terrain', function (b) { setTerrain(!terrainOn); b.classList.toggle('on', terrainOn); });
 toolBtn(ICONS.draw, 'Draw a sketch layer', function () { startSketch(); });
+legendBtn = toolBtn(ICONS.legend, 'Legend', function () { legendOpen = !legendOpen; legendCollapsed = false; renderLegend(); });
+legendBtn.style.display = 'none';
 toolBtn(ICONS.camera, 'Save as PNG', function () { exportPng(); });
 if (!POPOUT && window.mvPageHtml) toolBtn(ICONS.popout, 'Open in a new window', function () { popOut(); });
 globeBtn.classList.toggle('on', globeOn);
@@ -1405,7 +1620,9 @@ map.getCanvas().addEventListener('webglcontextlost', function () { window.mvLost
 function popOut() {
   if (editor) finishEdit(true);
   var view = viewState();
+  // no referrer, like the sandboxed inline iframe: OSM's tile policy 403s the blob: page's referrer
   var html = window.mvPageHtml.replace('<html ', '<html data-mv-popout="1" ')
+    .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="referrer" content="no-referrer">')
     .replace('id="mv-config">', 'id="mv-config" data-view="' + encodeURIComponent(JSON.stringify(view)) + '">');
   var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
   var w = null;
@@ -1717,6 +1934,80 @@ map.on('sourcedata', function (ev) {
   if (e.note && e.note.indexOf('Tiles failed') === 0) { e.note = null; renderPanel(); }
 });
 new ResizeObserver(function () { map.resize(); reportHeight(); }).observe(wrap);
+
+// ---------- snapshot for look_at_map -------------------------------------------------------------
+// The server never sees the map. look_at_map asks this page (via the host) for a picture of the
+// canvas plus the panel state: load errors, feature counts, what is drawn, the view. That is how
+// the model gets to check its own work.
+window.mvSnapshot = function (opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    var t0 = Date.now(), finished = false;
+    function settled() { return bootDone && map.loaded() && !entries.some(function (e) { return e.state === 'loading'; }); }
+    function finish() {
+      if (finished) return;
+      finished = true;
+      var b = map.getBounds(), c = map.getCenter();
+      var out = {
+        ok: true, settled: settled(), title: SPEC.title || '', basemap: currentBasemap.id, editing: !!editor,
+        view: { center: [+c.lng.toFixed(5), +c.lat.toFixed(5)], zoom: +map.getZoom().toFixed(2), pitch: Math.round(map.getPitch()),
+          bearing: Math.round(map.getBearing()), bounds: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(function (v) { return +v.toFixed(4); }) },
+        layers: entries.map(function (e) {
+          var ids = e.layerIds.filter(function (id) { return map.getLayer(id); }), drawn = 0;
+          try { drawn = ids.length ? map.queryRenderedFeatures({ layers: ids }).length : 0; } catch (err) {}
+          return { index: e.idx + 1, name: e.name, type: e.type, state: e.state, error: e.error, note: e.note, visible: e.visible,
+            opacity: e.opacity, featureCount: e.featureCount, tilesLoaded: e.swatch === 'raster' ? !!e.tileOk : null, rendered: drawn, edited: !!e.edited };
+        })
+      };
+      if (opts.png === false) return resolve(out);
+      // a fresh frame, scaled to at most 1200px wide and JPEG-compressed: vision models do not need more
+      map.once('render', function () {
+        try {
+          var cv = map.getCanvas(), scale = Math.min(1, 1200 / cv.width), oc = document.createElement('canvas');
+          oc.width = Math.round(cv.width * scale); oc.height = Math.round(cv.height * scale);
+          oc.getContext('2d').drawImage(cv, 0, 0, oc.width, oc.height);
+          out.png = oc.toDataURL('image/jpeg', 0.85);
+          out.pngSize = [oc.width, oc.height];
+        } catch (err) { out.pngError = String(err && err.message || err); }
+        resolve(out);
+      });
+      map.triggerRepaint();
+    }
+    (function wait() {
+      if (settled() || Date.now() - t0 > num(opts.timeout, 12000)) return finish();
+      setTimeout(wait, 250);
+    })();
+  });
+};
+// identify for query_map: what is at [lon, lat]? Pans there first when it is off screen (features are only
+// queryable once drawn), shows the popup so the user sees what was asked, returns the attributes.
+window.mvIdentify = function (opts) {
+  var lngLat = { lng: num(opts.lon, 0), lat: num(opts.lat, 0) }, only = null, panned = false;
+  if (opts.layers && opts.layers.length) {
+    only = {};
+    entries.forEach(function (e) {
+      if (opts.layers.some(function (n) { return String(n).toLowerCase() === e.name.toLowerCase() || +n === e.idx + 1; })) only[e.key] = 1;
+    });
+  }
+  function idle() { return new Promise(function (res) { if (map.loaded()) res(); else map.once('idle', res); }); }
+  return new Promise(function (resolve) {
+    var p = map.project(lngLat), cv = map.getCanvas(), m = 20;
+    if (p.x > m && p.y > m && p.x < cv.clientWidth - m && p.y < cv.clientHeight - m) return resolve();
+    panned = true;
+    map.once('moveend', resolve);
+    map.easeTo({ center: lngLat, duration: 600 });
+  }).then(idle).then(function () {
+    var r = identifyAt(map.project(lngLat), only);
+    return r.done.then(function () {
+      popup.remove();
+      if (r.hits.length) popup.setLngLat(lngLat).setDOMContent(r.box).addTo(map);
+      var queried = entries.filter(function (e) { return e.visible && (!only || only[e.key]) && (e.interactive || (e.wms && e.queryable)); });
+      return { ok: true, lon: lngLat.lng, lat: lngLat.lat, zoom: +map.getZoom().toFixed(2), panned: panned, hits: r.hits,
+        queried: queried.map(function (e) { return e.name; }) };
+    });
+  });
+};
+window.mvOps = { snapshot: window.mvSnapshot, identify: window.mvIdentify };
 window.__mv = { map: map, entries: entries, startEdit: startEdit, finishEdit: finishEdit, startSketch: startSketch,
   get editor() { return editor; } };
 })();
@@ -1771,6 +2062,24 @@ BOOT_SCRIPT = r"""
   }
   // Start only once scrolled into view and release after a while off screen (see mvRelease):
   // reopening a long chat must not create one WebGL context per map.
+  // look_at_map / query_map: the host page posts {type:'mv:call', op, req, ...}; answer with
+  // window.mvOps[op] once the map runs (starting it if it has not scrolled into view yet)
+  window.addEventListener('message', function (ev) {
+    var d = ev.data || {};
+    if (!d || d.type !== 'mv:call' || !ev.source) return;
+    if (!started) start();
+    var t0 = Date.now();
+    function reply(result) { try { ev.source.postMessage({ type: 'mv:result', req: d.req, result: result }, '*'); } catch (e) {} }
+    (function wait() {
+      if (window.mvOps) {
+        var fn = window.mvOps[d.op];
+        if (!fn) return reply({ ok: false, reason: 'unknown operation ' + d.op });
+        return fn(d).then(reply, function (e) { reply({ ok: false, reason: String(e && e.message || e) }); });
+      }
+      if (msg.className === 'mv-fail' || Date.now() - t0 > 25000) return reply({ ok: false, reason: msg.textContent || 'the map did not start' });
+      setTimeout(wait, 200);
+    })();
+  });
   var wrap = document.getElementById('mv-wrap'), hideTimer = 0;
   if (!window.IntersectionObserver || document.documentElement.hasAttribute('data-mv-popout')) { start(); return; }
   new IntersectionObserver(function (items) {
@@ -2033,8 +2342,10 @@ def _json_for_html(obj) -> str:
     )
 
 
-def _build_html(spec: dict, valves) -> str:
+def _build_html(spec: dict, valves, map_id: str = "m1", version: int = 1) -> str:
     config = {
+        "mapId": map_id,        # look_at_map finds this map's iframe by these two keys
+        "mapVersion": version,
         "spec": spec,
         "height": spec["height"],
         "basemaps": BASEMAPS,
@@ -2072,15 +2383,28 @@ def _build_html(spec: dict, valves) -> str:
     )
 
 
-def _summarise(spec: dict, warnings: list, rejected: list) -> str:
-    lines = [f"Map \"{spec['title']}\" is now displayed to the user (basemap: {spec['basemap']})."]
+def _layer_lines(spec: dict) -> list:
+    out = []
+    for i, layer in enumerate(spec["layers"], 1):
+        state = "visible" if layer.get("visible", True) is not False else "hidden"
+        extra = ""
+        if layer["type"] == "geojson" and isinstance(layer.get("data"), dict):
+            extra = f", {len(layer['data'].get('features') or [])} features inline"
+        out.append(f"  {i}. {layer['name']} [{layer['type']}, {state}{extra}]")
+    return out
+
+
+def _summarise(spec: dict, warnings: list, rejected: list, map_id: str = "m1", version: int = 1, errors: Optional[list] = None) -> str:
+    verb = "is now displayed to the user" if version == 1 else f"was updated (version {version}) and is displayed again"
+    lines = [f"Map {map_id} \"{spec['title']}\" {verb} (basemap: {spec['basemap']})."]
     if spec["layers"]:
-        lines.append("Layers, bottom to top:")
-        for i, layer in enumerate(spec["layers"], 1):
-            state = "visible" if layer.get("visible", True) is not False else "hidden"
-            lines.append(f"  {i}. {layer['name']} [{layer['type']}, {state}]")
+        lines.append("Layers, bottom to top (index, name, type):")
+        lines.extend(_layer_lines(spec))
     else:
         lines.append("No overlay layers.")
+    if errors:
+        lines.append("Problems with this request:")
+        lines.extend(f"  - {e}" for e in errors)
     if rejected:
         lines.append("Rejected layers (not drawn):")
         lines.extend(f"  - {r}" for r in rejected)
@@ -2088,15 +2412,83 @@ def _summarise(spec: dict, warnings: list, rejected: list) -> str:
         lines.append("Warnings:")
         lines.extend(f"  - {w}" for w in warnings)
     lines.append(
-        "The user can toggle, reorder and restyle layers, label them, switch basemaps, draw sketches and edit "
-        "GeoJSON/WFS/OGC API features in the map panel; 'Send to chat' puts a layer's GeoJSON into their next message, "
-        "which you can reuse as an inline geojson layer. "
-        "Layers that fail in the browser (CORS, bad layer names, HTTP errors) show a red error in that panel; "
-        "you cannot see it, so if the user reports a problem use inspect_ogc_service to check names. "
-        "To change the map, call show_map again with the full updated spec. "
-        "Describe what the map shows; do not print the spec or code."
+        f"Next steps: change this map with update_map(map_id=\"{map_id}\", ...) (add, remove, restyle, reorder, "
+        "show/hide layers, move the view) rather than drawing a new one. Call look_at_map to see what actually "
+        "rendered: layers that fail in the browser (CORS, wrong layer names, HTTP errors) only show there. "
+        "Call query_map(longitude, latitude) to identify features at a location (vector attributes, WMS GetFeatureInfo). "
+        "The user can toggle, reorder, restyle and label layers, switch basemaps, draw sketches and edit features "
+        "in the map panel; 'Send to chat' puts a layer's GeoJSON into their next message, which you can reuse as "
+        "an inline geojson layer. Describe what the map shows; do not print the spec or code."
     )
     return "\n".join(lines)
+
+
+# Runs in the Open WebUI page (via the 'execute' event): finds the newest iframe of this map,
+# sends it PAYLOAD ({op: 'snapshot'|'identify', ...}) and returns the answer as a JSON string.
+_BRIDGE_JS = r"""
+var frames = Array.prototype.slice.call(document.querySelectorAll('iframe')), best = null, bestV = -1;
+frames.forEach(function (f) {
+  var s = f.getAttribute('srcdoc') || '';
+  if (s.indexOf('"mapId":MAPID,') < 0) return;
+  var m = s.match(/"mapVersion":(\d+)/);
+  if (m && +m[1] > bestV) { best = f; bestV = +m[1]; }
+});
+if (!best) return JSON.stringify({ ok: false, reason: 'map ' + MAPID + ' is not on this page (closed or a different chat)' });
+return await new Promise(function (resolve) {
+  var req = 'mv' + Date.now() + Math.random().toString(36).slice(2);
+  var timer = setTimeout(function () { window.removeEventListener('message', on); resolve(JSON.stringify({ ok: false, reason: 'the map did not answer in time', version: bestV })); }, TIMEOUT);
+  function on(ev) {
+    var d = ev.data || {};
+    if (d.type !== 'mv:result' || d.req !== req) return;
+    clearTimeout(timer);
+    window.removeEventListener('message', on);
+    resolve(JSON.stringify(Object.assign({ version: bestV }, d.result || {})));
+  }
+  window.addEventListener('message', on);
+  best.contentWindow.postMessage(Object.assign({ type: 'mv:call', req: req }, PAYLOAD), '*');
+});
+"""
+
+
+def _fmt_value(v) -> str:
+    s = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+    return s if len(s) <= 200 else s[:200] + "…"
+
+
+def _identify_lines(rec: dict, res: dict) -> list:
+    """query_map's answer as text the model can read."""
+    where = f"lon {res.get('lon')}, lat {res.get('lat')}"
+    lines = [f"Map {rec['id']} at {where} (zoom {res.get('zoom')}" + (", the map was panned there" if res.get("panned") else "") + "):"]
+    hits = res.get("hits") or []
+    for h in hits:
+        feats = h.get("features") or []
+        if feats:
+            lines.append(f"  {h.get('layer')} [{h.get('type')}]: {len(feats)} feature{'s' if len(feats) != 1 else ''}")
+            for p in feats:
+                pairs = [f"{k}: {_fmt_value(v)}" for k, v in list((p or {}).items())[:40] if v is not None and v != ""]
+                lines.append("    " + ("; ".join(pairs) if pairs else "(no attributes)"))
+        elif h.get("text"):
+            lines.append(f"  {h.get('layer')} [{h.get('type')}]: {h['text']}")
+        elif h.get("error"):
+            lines.append(f"  {h.get('layer')} [{h.get('type')}]: GetFeatureInfo failed ({h['error']})")
+    queried = res.get("queried") or []
+    missed = [n for n in queried if not any(h.get("layer") == n for h in hits)]
+    if not hits:
+        lines.append("  Nothing found at this point." if queried else "  No layer on this map can be identified (raster tiles have no attributes).")
+    if missed:
+        lines.append("Nothing at this point in: " + ", ".join(missed) + ".")
+    lines.append("The popup with these attributes is shown to the user on the map.")
+    return lines
+
+_NOT_OPEN = ("The map must be open in the user's chat; if the chat was reloaded, the user may need to scroll "
+             "to the map so it starts.")
+
+_VISION_SYSTEM = (
+    "You are checking a screenshot of a web map that an assistant drew with a tool. Be factual and brief. "
+    "Describe what the map shows: the area, the basemap, and which overlay layers are visibly drawn. Say plainly if an "
+    "expected layer is not visible, if the map is blank or grey, if data is in an obviously wrong place, or if labels "
+    "are unreadable. Then answer the question, if there is one. Do not speculate beyond what is visible. Under 180 words."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2419,9 +2811,27 @@ class Tools:
             description="Let inspect_ogc_service fetch from private/internal IP addresses. Off by default to prevent SSRF.",
         )
         request_timeout: int = Field(default=20, description="Timeout in seconds for inspect_ogc_service requests.")
+        vision_model: str = Field(
+            default="",
+            description="Model that look_at_map sends the map screenshot to. Empty = the model used in the chat "
+            "(it must accept images). 'off' = no screenshot description, only the layer states.",
+        )
+        look_timeout: int = Field(default=45, description="Seconds look_at_map waits for the browser to answer.")
 
     def __init__(self):
         self.valves = self.Valves()
+        self.store = _MapStore(_store_dir())
+
+    @staticmethod
+    def _chat_id(metadata) -> str:
+        return str((metadata or {}).get("chat_id") or "")
+
+    async def _emit(self, spec: dict, rec: dict, emitter, rejected: list) -> None:
+        html = _build_html(spec, self.valves, rec["id"], rec["version"])
+        await emitter({"type": "embeds", "data": {"embeds": [html]}})
+        n = len(spec["layers"])
+        note = f"Map {rec['id']}: {n} layer{'s' if n != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else "")
+        await emitter({"type": "status", "data": {"description": note, "done": True}})
 
     async def show_map(
         self,
@@ -2439,13 +2849,15 @@ class Tools:
         terrain: bool = False,
         height: Optional[int] = None,
         __event_emitter__=None,
+        __metadata__=None,
     ):
         """
-        Show an interactive MapLibre map inline in the chat. Use it when the user asks for a map or wants
+        Show a NEW interactive MapLibre map inline in the chat. Use it when the user asks for a map or wants
         to see web map services (WMS, WMTS, WFS, XYZ tiles, OGC API Features), GeoJSON, vector tiles,
-        PMTiles or Cloud Optimized GeoTIFFs. Each call draws one new map; to change a map, call it again
-        with the complete updated spec. If you are unsure of WMS/WFS/WMTS layer names, call
-        inspect_ogc_service first instead of guessing.
+        PMTiles or Cloud Optimized GeoTIFFs. It returns a map id (m1, m2, ...). To change an existing map
+        (add/remove/restyle layers, move the view) call update_map with that id instead of drawing another
+        map. After drawing, call look_at_map to check that every layer really rendered. If you are unsure of
+        WMS/WFS/WMTS layer names, call inspect_ogc_service first instead of guessing.
 
         Coordinates are always [longitude, latitude] in WGS84. Leave center/zoom/bounds empty to fit the
         map to the data automatically.
@@ -2499,22 +2911,333 @@ class Tools:
         :param globe: Use the 3D globe projection.
         :param terrain: Turn on 3D terrain.
         :param height: Map height in pixels (240-1200).
-        :return: The map is shown to the user; you get a text summary with any rejected layers.
+        :return: The map is shown to the user; you get its map id and a summary with any rejected layers.
         """
         raw = {
             "title": title, "layers": layers, "basemap": basemap, "center": center, "zoom": zoom,
             "bounds": bounds, "pitch": pitch, "bearing": bearing, "globe": globe, "terrain": terrain, "height": height,
         }
         spec, warnings, rejected = _normalise_spec(raw, self.valves)
-        html = _build_html(spec, self.valves)
-        summary = _summarise(spec, warnings, rejected)
+        rec = self.store.create(self._chat_id(__metadata__), spec)
+        summary = _summarise(spec, warnings, rejected, rec["id"], rec["version"])
         if __event_emitter__:
-            await __event_emitter__({"type": "embeds", "data": {"embeds": [html]}})
-            n = len(spec["layers"])
-            note = f"Map: {n} layer{'s' if n != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else "")
-            await __event_emitter__({"type": "status", "data": {"description": note, "done": True}})
+            await self._emit(spec, rec, __event_emitter__, rejected)
             return summary
+        html = _build_html(spec, self.valves, rec["id"], rec["version"])
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"}), summary
+
+    async def update_map(
+        self,
+        map_id: Optional[str] = None,
+        add_layers: Optional[list[dict]] = None,
+        remove_layers: Optional[list[str]] = None,
+        update_layers: Optional[list[dict]] = None,
+        title: Optional[str] = None,
+        basemap: Optional[str] = None,
+        center: Optional[list[float]] = None,
+        zoom: Optional[float] = None,
+        bounds: Optional[list[float]] = None,
+        pitch: Optional[float] = None,
+        bearing: Optional[float] = None,
+        globe: Optional[bool] = None,
+        terrain: Optional[bool] = None,
+        __event_emitter__=None,
+        __metadata__=None,
+    ) -> str:
+        """
+        Change a map you drew earlier in this chat and show the updated version. Send only the changes;
+        the tool keeps the rest of the map. Refer to layers by name (case-insensitive) or by their 1-based
+        index from the layer list. Changes are applied in this order: update_layers, remove_layers, add_layers.
+
+        update_layers takes objects like {"name": "Rivers", "visible": false}, {"index": 2, "opacity": 0.5},
+        {"name": "Sites", "style": {"color": "#e63946", "label": "name"}} (style keys merge with the existing
+        style; set a key to null to drop it), {"name": "Sites", "position": 1} (1 = bottom of the draw order),
+        {"name": "Old name", "rename": "New name"}, or any other layer key such as url, layers, typeName, params.
+
+        :param map_id: The id returned by show_map (m1, m2, ...). Leave empty for the latest map in this chat.
+        :param add_layers: Layer objects to add on top, same format as show_map's layers.
+        :param remove_layers: Names or indexes of layers to remove.
+        :param update_layers: Patches for existing layers (see above).
+        :param title: New map title.
+        :param basemap: New basemap (same names as show_map).
+        :param center: New [longitude, latitude] (replaces bounds).
+        :param zoom: New zoom level.
+        :param bounds: New [west, south, east, north] to fit (replaces center/zoom).
+        :param pitch: Camera tilt in degrees.
+        :param bearing: Map rotation in degrees.
+        :param globe: Globe projection on or off.
+        :param terrain: 3D terrain on or off.
+        :return: Summary of the updated map, with any layers that could not be found or were rejected.
+        """
+        chat_id = self._chat_id(__metadata__)
+        rec = self.store.get(chat_id, _map_id(map_id))
+        if not rec:
+            return (f"No map {map_id!r} in this chat." if map_id else "There is no map in this chat yet.") + \
+                " Draw one with show_map first."
+        errors: list = []
+        for name, value in (("add_layers", add_layers), ("update_layers", update_layers), ("remove_layers", remove_layers)):
+            if isinstance(value, str):
+                errors.append(f"{name} must be a list, not a string.")
+        add = _loads_maybe(add_layers, "add_layers", errors) if isinstance(add_layers, str) else add_layers
+        upd = _loads_maybe(update_layers, "update_layers", errors) if isinstance(update_layers, str) else update_layers
+        rem = _loads_maybe(remove_layers, "remove_layers", errors) if isinstance(remove_layers, str) else remove_layers
+        if isinstance(add, dict):
+            add = [add]
+        if isinstance(upd, dict):
+            upd = [upd]
+        if isinstance(rem, (str, int)):
+            rem = [rem]
+        raw = dict(rec["spec"])
+        raw["layers"] = _patch_layers(rec["spec"].get("layers") or [], upd, rem, add, errors)
+        if title:
+            raw["title"] = title
+        if basemap:
+            raw["basemap"] = basemap
+        if bounds is not None:
+            raw["bounds"] = bounds
+            raw.pop("center", None)
+            raw.pop("zoom", None)
+        if center is not None:
+            raw["center"] = center
+            raw.pop("bounds", None)
+        if zoom is not None:
+            raw["zoom"] = zoom
+            raw.pop("bounds", None)
+        for key, value in (("pitch", pitch), ("bearing", bearing), ("globe", globe), ("terrain", terrain)):
+            if value is not None:
+                raw[key] = value
+        spec, warnings, rejected = _normalise_spec(raw, self.valves)
+        rec["spec"] = spec
+        self.store.bump(chat_id, rec)
+        summary = _summarise(spec, warnings, rejected, rec["id"], rec["version"], errors)
+        if __event_emitter__:
+            await self._emit(spec, rec, __event_emitter__, rejected)
+        return summary
+
+    async def describe_map(self, map_id: Optional[str] = None, __metadata__=None) -> str:
+        """
+        List what is on a map you drew in this chat: its layers (index, name, type, visibility, opacity, source,
+        style), basemap and view, plus the result of the last look_at_map if there was one. Cheap; use it before
+        update_map when you are not sure of the layer names or indexes.
+
+        :param map_id: The map id (m1, m2, ...). Leave empty for the latest map in this chat.
+        :return: JSON description of the map.
+        """
+        rec = self.store.get(self._chat_id(__metadata__), _map_id(map_id))
+        if not rec:
+            return json.dumps({"error": "No such map in this chat. Draw one with show_map first."})
+        spec = rec["spec"]
+        layers = []
+        for i, layer in enumerate(spec["layers"], 1):
+            item = {"index": i, "name": layer["name"], "type": layer["type"],
+                    "visible": layer.get("visible", True) is not False, "opacity": layer.get("opacity", 1)}
+            for key in ("url", "layers", "typeName", "collection", "sourceLayer", "source", "mode"):
+                if layer.get(key) is not None:
+                    item[key] = str(layer[key])[:200]
+            if layer["type"] == "geojson" and isinstance(layer.get("data"), dict):
+                item["features"] = len(layer["data"].get("features") or [])
+            if layer.get("style"):
+                item["style"] = layer["style"]
+            layers.append(item)
+        view = {k: spec[k] for k in ("center", "zoom", "bounds", "pitch", "bearing", "globe", "terrain") if spec.get(k)}
+        out = {"map_id": rec["id"], "version": rec["version"], "title": spec["title"], "basemap": spec["basemap"],
+               "view": view or "fit to data", "layers": layers}
+        if rec.get("look"):
+            out["last_look"] = rec["look"]
+        return json.dumps(out, ensure_ascii=False)
+
+    async def _ask_browser(self, rec: dict, payload: dict, event_call) -> dict:
+        """Run an op (snapshot, identify) inside this map's iframe in the user's browser. Always returns a dict with 'ok'."""
+        code = (_BRIDGE_JS.replace("MAPID", json.dumps(rec["id"]))
+                .replace("TIMEOUT", str(max(5, self.valves.look_timeout - 5) * 1000))
+                .replace("PAYLOAD", json.dumps(payload)))  # last: the payload may contain any text
+        try:
+            raw = await asyncio.wait_for(event_call({"type": "execute", "data": {"code": code}}), timeout=self.valves.look_timeout)
+            res = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except asyncio.TimeoutError:
+            return {"ok": False, "reason": "the browser did not answer in time"}
+        except Exception as exc:  # socket gone, page closed, JSON error
+            return {"ok": False, "reason": f"could not reach the browser ({exc})"}
+        if not isinstance(res, dict):
+            return {"ok": False, "reason": "unexpected answer from the browser"}
+        if not res.get("ok"):
+            res["ok"] = False
+            res.setdefault("reason", "unknown error")
+        return res
+
+    async def query_map(
+        self,
+        longitude: float,
+        latitude: float,
+        map_id: Optional[str] = None,
+        layers: Optional[list[str]] = None,
+        __event_emitter__=None,
+        __event_call__=None,
+        __metadata__=None,
+    ) -> str:
+        """
+        Identify what is at a location on a map you drew in this chat: the attributes of the features of the
+        vector layers there (GeoJSON, WFS, OGC API, vector tiles, PMTiles, buildings) and the GetFeatureInfo
+        answer of the queryable WMS layers. Works like the user clicking the map: the popup with the result is
+        shown to them too, and the map pans to the location when it is off screen. Raster tiles (xyz, wmts,
+        cog, image) have no attributes and cannot be queried. Use it to answer "what is at / here / in this
+        area" questions about the map's own layers.
+
+        :param longitude: Longitude of the location (WGS84).
+        :param latitude: Latitude of the location (WGS84).
+        :param map_id: The map id (m1, m2, ...). Leave empty for the latest map in this chat.
+        :param layers: Optional layer names or 1-based indexes to limit the query to; default all visible layers.
+        :return: The attributes found at the location, per layer.
+        """
+        chat_id = self._chat_id(__metadata__)
+        rec = self.store.get(chat_id, _map_id(map_id))
+        if not rec:
+            return "There is no map in this chat to query. Draw one with show_map first."
+        if not __event_call__:
+            return "query_map needs a live chat session (it asks the user's browser) and none is available here."
+        try:
+            lon, lat = float(longitude), float(latitude)
+        except (TypeError, ValueError):
+            return "longitude and latitude must be numbers (WGS84, e.g. longitude 4.9, latitude 52.37)."
+        if abs(lat) > 90 >= abs(lon) and abs(lat) <= 180:
+            lon, lat = lat, lon  # given as [lat, lon]
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            return f"Location out of range: longitude {lon}, latitude {lat}."
+        if isinstance(layers, str):
+            layers = [s.strip() for s in layers.split(",") if s.strip()]
+        if __event_emitter__:
+            await __event_emitter__({"type": "status", "data": {"description": f"Identifying on map {rec['id']}…", "done": False}})
+        res = await self._ask_browser(rec, {"op": "identify", "lon": lon, "lat": lat, "layers": [str(l) for l in layers or []]}, __event_call__)
+        if not res.get("ok"):
+            if __event_emitter__:
+                await __event_emitter__({"type": "status", "data": {"description": "Could not query the map", "done": True}})
+            return f"Could not query map {rec['id']}: {res['reason']}. {_NOT_OPEN}"
+        n = sum(len(h.get("features") or []) or (1 if h.get("text") else 0) for h in res.get("hits") or [])
+        if __event_emitter__:
+            await __event_emitter__({"type": "status", "data": {"description": f"Identified on map {rec['id']}: {n} result{'s' if n != 1 else ''}", "done": True}})
+        return "\n".join(_identify_lines(rec, res))
+
+    async def look_at_map(
+        self,
+        map_id: Optional[str] = None,
+        question: str = "",
+        __event_emitter__=None,
+        __event_call__=None,
+        __request__=None,
+        __user__=None,
+        __model__=None,
+        __metadata__=None,
+    ) -> str:
+        """
+        Look at a map you drew in this chat as the user sees it. Returns, for every layer, whether it loaded,
+        any error (wrong layer name, CORS, HTTP status), feature counts and how many features are drawn in
+        the current view, plus the view itself and a short description of the screenshot by a vision model.
+        Call it after show_map or update_map to verify the result, and whenever the user says something looks
+        wrong. Fix problems with update_map; check names with inspect_ogc_service.
+
+        :param map_id: The map id (m1, m2, ...). Leave empty for the latest map in this chat.
+        :param question: Optional question about what is visible, e.g. "is the river layer drawn?".
+        :return: Layer states, view and a description of what the map shows.
+        """
+        chat_id = self._chat_id(__metadata__)
+        rec = self.store.get(chat_id, _map_id(map_id))
+        if not rec:
+            return "There is no map in this chat to look at. Draw one with show_map first."
+        if not __event_call__:
+            return "look_at_map needs a live chat session (it asks the user's browser for the map) and none is available here."
+        use_vision = self.valves.vision_model.strip().lower() != "off"
+        if __event_emitter__:
+            await __event_emitter__({"type": "status", "data": {"description": f"Looking at map {rec['id']}…", "done": False}})
+        snap = await self._ask_browser(rec, {"op": "snapshot", "png": use_vision}, __event_call__)
+        if not snap.get("ok"):
+            if __event_emitter__:
+                await __event_emitter__({"type": "status", "data": {"description": "Could not look at the map", "done": True}})
+            return f"Could not look at map {rec['id']}: {snap['reason']}. {_NOT_OPEN}"
+        png = snap.pop("png", None)
+        rec["look"] = {"version": snap.get("version"), "view": snap.get("view"), "layers": snap.get("layers"), "at": time.time()}
+        lines = [f"Map {rec['id']} (version {snap.get('version')}) \"{snap.get('title', '')}\", basemap {snap.get('basemap')}."]
+        v = snap.get("view") or {}
+        if v:
+            lines.append(f"View: center {v.get('center')}, zoom {v.get('zoom')}, pitch {v.get('pitch')}, bearing {v.get('bearing')}, "
+                         f"bounds [W,S,E,N] {v.get('bounds')}.")
+        if not snap.get("settled"):
+            lines.append("Note: some layers were still loading when the snapshot was taken.")
+        problems = []
+        lines.append("Layers (index, name, type):")
+        for L in snap.get("layers") or []:
+            bits = ["visible" if L.get("visible") else "hidden"]
+            if L.get("state") == "error":
+                bits.append(f"ERROR: {L.get('error')}")
+                problems.append(f"{L.get('name')}: {L.get('error')}")
+            elif L.get("state") == "loading":
+                bits.append("still loading")
+            else:
+                bits.append("loaded")
+            if L.get("featureCount") is not None:
+                bits.append(f"{L['featureCount']} features")
+            if L.get("tilesLoaded") is False and L.get("visible"):
+                bits.append("no tiles loaded yet")
+            if L.get("rendered") is not None and L.get("featureCount") is not None:
+                bits.append(f"{L['rendered']} drawn in view")
+            if L.get("note"):
+                bits.append(f"note: {L['note']}")
+                if "failed" in str(L["note"]) and L.get("visible"):
+                    problems.append(f"{L.get('name')}: {L['note']}")
+            if L.get("edited"):
+                bits.append("edited by the user")
+            lines.append(f"  {L.get('index')}. {L.get('name')} [{L.get('type')}] " + ", ".join(bits))
+        if problems:
+            lines.append("Problems to fix (use update_map; check names with inspect_ogc_service):")
+            lines.extend(f"  - {p}" for p in problems)
+        if png and use_vision:
+            model_id = self.valves.vision_model.strip() or (__model__ or {}).get("id") or ""
+            desc, err = await self._vision(__request__, __user__, model_id, png, snap, question)
+            if desc:
+                lines.append(f"What the screenshot shows (as seen by {model_id}):")
+                lines.append(desc.strip())
+            else:
+                lines.append(f"No screenshot description: {err}")
+        elif use_vision:
+            lines.append(f"No screenshot: {snap.get('pngError') or 'the map could not be captured'}.")
+        if __event_emitter__:
+            await __event_emitter__({"type": "status", "data": {"description": f"Looked at map {rec['id']}" + (
+                f": {len(problems)} problem{'s' if len(problems) != 1 else ''}" if problems else ""), "done": True}})
+        self.store.save(chat_id)
+        return "\n".join(lines)
+
+    async def _vision(self, request, user, model_id: str, png: str, snap: dict, question: str):
+        """Describe the screenshot with a vision-capable model through Open WebUI. Returns (text, error)."""
+        if not model_id:
+            return None, "no model id (set the vision_model valve)"
+        if request is None or not user:
+            return None, "Open WebUI's internal API is not available here"
+        try:
+            from open_webui.models.users import Users  # type: ignore
+            from open_webui.utils.chat import generate_chat_completion  # type: ignore
+        except Exception as exc:  # not installed, or a version whose imports fail
+            return None, f"cannot import Open WebUI ({str(exc)[:120]})"
+        try:
+            user_obj = Users.get_user_by_id(user["id"]) if isinstance(user, dict) else user
+            expected = "; ".join(f"{L.get('name')} ({L.get('type')}{', hidden' if not L.get('visible') else ''})"
+                                 for L in snap.get("layers") or []) or "none"
+            text = (f"Map title: {snap.get('title') or 'untitled'}. Basemap: {snap.get('basemap')}. "
+                    f"View centre (lon, lat): {(snap.get('view') or {}).get('center')}, zoom {(snap.get('view') or {}).get('zoom')}. "
+                    f"Overlay layers that should be drawn: {expected}.")
+            if question:
+                text += f"\nQuestion: {question}"
+            form = {"model": model_id, "stream": False, "messages": [
+                {"role": "system", "content": _VISION_SYSTEM},
+                {"role": "user", "content": [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": png}}]},
+            ]}
+            res = await generate_chat_completion(request, form, user_obj, bypass_filter=True)
+            if isinstance(res, dict):
+                content = (res.get("choices") or [{}])[0].get("message", {}).get("content")
+                if content:
+                    return str(content), None
+                return None, f"empty answer from {model_id}" + (f": {res.get('error')}" if res.get("error") else "")
+            return None, f"unexpected answer type from {model_id}"
+        except Exception as exc:
+            return None, f"{model_id} could not describe the image ({str(exc)[:200]}). It may not accept images; set the vision_model valve."
 
     async def inspect_ogc_service(
         self,

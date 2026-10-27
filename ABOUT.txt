@@ -1,0 +1,147 @@
+MAP VISUALIZER FOR OPEN WEBUI  (version 0.4.0)
+==============================================
+
+Interactive maps, drawn inline in the chat.
+
+Ask for a map in plain words. The model builds it from your web map services and data, and it
+appears in the conversation. The model can then change the map step by step and look at what it
+drew, so it notices and fixes layers that did not load. You can rearrange, restyle and edit the
+map yourself, and hand your edits back to the model.
+
+Built on MapLibre GL JS. No API keys or accounts are needed: every basemap is free and keyless,
+and OpenStreetMap is the default.
+
+Source, full documentation and examples:
+https://github.com/om2468/open-webui-plugin-map
+
+
+WHAT IT DOES
+------------
+
+The tool gives the model six functions.
+
+show_map
+  Draws a new interactive map in the chat from a list of layers and returns its id. The layers
+  can be:
+  - WMS (with click-to-identify and legends)
+  - WMTS
+  - WFS
+  - OGC API Features
+  - XYZ / TMS tiles
+  - GeoJSON (inline or from a URL)
+  - vector tiles
+  - PMTiles
+  - Cloud Optimized GeoTIFF
+  - georeferenced images
+  - open building footprints from OpenStreetMap or Overture Maps, flat or in 3D
+
+  The model controls the layer order, which layers are on or off, opacity, colours, labels and
+  data-driven styling (graduated or categorical, with legends).
+
+update_map
+  Changes a map the model drew earlier: add, remove, restyle, reorder, show or hide layers, or
+  move the view. The model sends only the change, not the whole map again.
+
+look_at_map
+  Shows the model what the user sees: for every layer whether it loaded or failed (and why),
+  how many features it has and how many are in view, plus a screenshot described by a vision
+  model. The model uses this to check and repair its own maps.
+
+query_map
+  Identifies what is at a location, like a click on the map: the attributes of the vector
+  features there and the GetFeatureInfo answer of WMS layers. The popup is shown to the user too.
+
+describe_map
+  Lists what is on a map: layers, view and the last look_at_map result.
+
+inspect_ogc_service
+  Reads a WMS, WFS, WMTS or OGC API Features service so the model uses real layer names
+  instead of guessing them.
+
+In the map, users can:
+- show, hide, reorder (drag and drop) and fade layers
+- change colours, outlines, line widths and point sizes, and label features by any attribute
+- edit features: move, reshape, add and delete points, lines, polygons, rectangles and circles,
+  and edit their attributes
+- draw a new sketch layer from scratch
+- download a layer as GeoJSON, or use "Send to chat" to put it in the message box for the model
+- switch between 23 keyless basemaps (OpenStreetMap, Esri, OpenFreeMap, USGS, NASA GIBS, PDOK)
+- use a 3D globe, 3D terrain and tilted views
+- click features to see their attributes (WMS layers answer with GetFeatureInfo)
+- read legends in a separate pane: colour classes and WMS legend images at full size
+- save the view as a PNG, or open the map full screen in a new window
+
+
+WHAT IT NEEDS
+-------------
+
+Open WebUI
+  Version 0.6.0 or later. Nothing to install: paste the tool into Workspace > Tools and save.
+  It uses only the Python standard library plus FastAPI and Pydantic, which Open WebUI already
+  includes.
+
+A model that handles tools well
+  Native (function) calling is recommended. The map spec is structured JSON, so capable models
+  do much better than small ones.
+
+Internet access from the user's browser
+  The map runs in the browser. It loads MapLibre GL (plus PMTiles and Terra Draw when they are
+  used) from unpkg.com, and fetches basemap tiles and your layers directly. For offline or
+  air-gapped installs, self-host these libraries and point the tool's valves at them; the
+  GitHub README explains how.
+
+Services that browsers can reach
+  - Your WMS, WFS, tile and GeoJSON hosts must send CORS headers, because the browser fetches
+    them directly.
+  - WMS and WMTS layers must be available in EPSG:3857 (Web Mercator).
+  - WFS layers must offer GeoJSON output.
+
+Optional
+  - A model that accepts images, for look_at_map's screenshot description. By default the
+    chat's own model is used; the vision_model valve can name another one, or turn it off.
+    Without it, look_at_map still reports every layer's load state and errors.
+  - Settings > Interface > "iframe Sandbox Allow Same Origin": with this on, the map follows
+    Open WebUI's dark or light theme. Without it, the map follows your operating system's theme.
+  - Cloud Optimized GeoTIFFs are tiled through TiTiler. The default is the public titiler.xyz
+    demo server, which is rate-limited; set your own endpoint for real use.
+
+
+SECURITY
+--------
+
+network_policy = open (the default)
+  Maps can load from any host, so any service works. A prompt-injected map could also send
+  data to an outside host.
+
+network_policy = allowlist
+  Maps can only load from the hosts you list; the browser enforces this.
+
+inspect_ogc_service is the only part that makes requests from your server. It refuses private
+and internal addresses unless an admin enables allow_private_networks.
+
+
+EXAMPLE PROMPTS
+---------------
+
+- "Show the Dutch provinces from the PDOK CBS WMS on the PDOK background map."
+- "Find a NASA GIBS night lights layer and show it on a globe."
+- "Plot these five offices, label them and colour them by region." (paste the data)
+- "Show Overture building footprints around Westminster on aerial imagery."
+- "Look at this WFS, tell me what layers it has and map the largest one: <url>"
+
+
+CREDITS
+-------
+
+Inspired by Classic298's Inline Visualizer and by Qiusheng Wu's work (leafmap, GeoAgent,
+maplibre-gl plugins).
+
+Built with:
+- MapLibre GL JS
+- PMTiles
+- Terra Draw
+- TiTiler
+- OpenFreeMap
+- Overture Maps
+
+Map data (c) OpenStreetMap contributors and the basemap providers listed in the map.

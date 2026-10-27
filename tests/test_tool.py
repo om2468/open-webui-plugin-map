@@ -580,15 +580,16 @@ def test_show_map_with_emitter():
     assert isinstance(result, str)
     # the embed, then a status line for the chat
     assert [e["type"] for e in events] == ["embeds", "status"]
-    assert events[1]["data"] == {"description": "Map: 2 layers, 2 rejected", "done": True}
+    assert events[1]["data"] == {"description": "Map m1: 2 layers, 2 rejected", "done": True}
+    assert result.startswith('Map m1 "My <Map>" is now displayed') and 'update_map(map_id="m1"' in result
     ev = events[0]
     assert ev["type"] == "embeds"
     assert list(ev["data"].keys()) == ["embeds"] and len(ev["data"]["embeds"]) == 1
     html = ev["data"]["embeds"][0]
     assert html.startswith("<!DOCTYPE html>") and "My &lt;Map&gt;" in html
 
-    assert result.index("1. Bottom [xyz, visible]") < result.index("2. Top [geojson, hidden]")
-    assert "Layers, bottom to top:" in result
+    assert result.index("1. Bottom [xyz, visible]") < result.index("2. Top [geojson, hidden, 0 features inline]")
+    assert "Layers, bottom to top (index, name, type):" in result
     assert "Rejected layers" in result
     assert "layers[2] (Broken)" in result and "layers[3] (Js)" in result
     assert "Unknown basemap 'bogus'" in result

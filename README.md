@@ -2,6 +2,8 @@
 
 Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, a basemap gallery, click-to-identify popups, open building footprints, 3D terrain, a globe view, PNG export and a pop-out window. Users can then reorder, restyle and label layers, edit features and their attributes, and send the result back to the model.
 
+The map is not a one-off picture. Each map has an id; the model changes it with small `update_map` calls, and with `look_at_map` it sees what actually rendered (layer errors, feature counts and a screenshot described by a vision model), so it can fix its own mistakes.
+
 No API keys are needed. The default basemap is OpenStreetMap.
 
 ## What it does
@@ -9,15 +11,18 @@ No API keys are needed. The default basemap is OpenStreetMap.
 | Feature | Detail |
 | --- | --- |
 | Many layer types | XYZ tiles, WMS, WMTS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, Cloud Optimized GeoTIFF, georeferenced images, building footprints |
-| Layer panel | Show or hide, opacity, drag to reorder, zoom to layer, legends (generated or from WMS `GetLegendGraphic`), per-layer error messages |
+| Layer panel | Show or hide, opacity, drag to reorder, zoom to layer, per-layer error messages |
+| Legend pane | Its own card at the bottom right, toggled from the toolbar: generated `colorBy` classes and WMS `GetLegendGraphic` images at native size, for the visible layers only |
 | Vector styling | The model sets colour, outline, labels, extrusion, filters, and `colorBy` classification (graduated or categorical) with automatic legend |
 | Style editor | Users can change a vector layer's colour, outline, line width, point size and labels (attribute, text size, colour) in the panel. Only the controls that fit the layer's geometry are shown. Server-styled layers (WMS, WMTS, XYZ, COG, images) offer opacity only |
 | Feature editing | Edit features of GeoJSON, WFS and OGC API layers (move, reshape, add, delete points, lines, polygons, rectangles, circles) and their attributes, or draw a new sketch layer with the pencil button. Download the result as GeoJSON, or **Send to chat** to put it in your message box for the AI. Uses [Terra Draw](https://github.com/JamesLMilner/terra-draw), loaded only when you edit |
 | Building footprints | Open data, no keys: OpenStreetMap buildings (OpenFreeMap) or [Overture Maps](https://overturemaps.org/) buildings (latest release, found automatically), as flat 2D footprints or extruded 3D |
-| Click to identify | Feature attributes for vector layers, `GetFeatureInfo` for WMS layers |
+| Identify | Click the map for feature attributes of vector layers and `GetFeatureInfo` of WMS layers. The model can do the same with `query_map(longitude, latitude)`, which shows the popup to you as well |
 | Basemaps | 23 keyless options (OpenStreetMap, Esri, OpenFreeMap, USGS, NASA GIBS, PDOK) or any XYZ template or MapLibre style URL |
 | 3D | Globe projection, terrain from open elevation tiles, extruded buildings, pitch and bearing |
 | `inspect_ogc_service` | Reads WMS, WFS, WMTS and OGC API Features capabilities so the model uses real layer names instead of guessing |
+| Living maps | `update_map` adds, removes, restyles, reorders, shows or hides layers and moves the view of an existing map by name or index. The model sends only the change; large GeoJSON is not resent. `describe_map` lists what is on a map |
+| The model can look | `look_at_map` asks the user's browser for the map's state (per-layer load errors, tile failures, feature counts, how many features are in view) and a screenshot, which a vision model describes. The model then fixes problems with `update_map` |
 | Export and pop-out | Save the current view as PNG, or open the map full-window in a new tab at the current view (downloads a standalone HTML file if popups are blocked) |
 | Theme aware | Follows Open WebUI's dark or light theme (see setup) |
 
@@ -34,6 +39,21 @@ No Same-Origin setting is required. If you turn on **iframe Sandbox Allow Same O
 
 To update, paste the new `tool.py` over the old one and save. The version is in the file header.
 
+## How the model works with a map
+
+| Function | What it does |
+| --- | --- |
+| `show_map` | Draws a new map and returns its id (`m1`, `m2`, ...). Each chat has its own maps |
+| `update_map` | Changes a map: `add_layers`, `remove_layers`, `update_layers` (patches by name or 1-based index: `visible`, `opacity`, `style` merged with the existing style, `position` in the draw order, `rename`, or any layer key), plus title, basemap, centre, zoom, bounds, pitch, bearing, globe and terrain. The updated map is shown again as a new embed in the current reply |
+| `describe_map` | Lists the map's layers, view and the result of the last `look_at_map`. Cheap, no browser round trip |
+| `look_at_map` | Asks the open chat page for the map's live state and a screenshot. Returns, per layer: loaded or failed (with the error text), feature count and how many features are drawn in the current view, plus the view and a description of the screenshot by a vision model. Works only while the chat is open in the user's browser |
+| `query_map` | Identifies what is at a longitude/latitude, like a click: attributes of the vector features there and the `GetFeatureInfo` answer of queryable WMS layers, optionally limited to named layers. The map pans there if the point is off screen and the popup is shown to the user. Raster tiles cannot be queried |
+| `inspect_ogc_service` | Reads a service's capabilities so layer names are real |
+
+The screenshot is a JPEG of the map canvas (at most 1200 px wide) sent to the model named in the `vision_model` valve, or to the chat's model when that valve is empty. That model must accept images; if it does not, `look_at_map` still returns the layer states and says the description failed. Set `vision_model` to `off` to skip the screenshot entirely. The screenshot stays inside your Open WebUI; it goes only to the model you configure.
+
+Map state is saved per chat under `DATA_DIR/map_visualizer/` (the last 20 maps of each chat), so `update_map` works after a server restart. Updates always produce a new embed; the earlier embeds remain in the chat history as they were.
+
 ## Using the map panel
 
 The model builds the map; the panel lets you adjust it without another prompt.
@@ -45,6 +65,7 @@ The model builds the map; the panel lets you adjust it without another prompt.
 | Opacity | Click the layer name or its button. Raster layers (WMS, WMTS, XYZ, COG) show a half-filled circle and offer opacity only, since the server styles them |
 | Restyle | Vector layers show a sliders button: colour (replaces any `colorBy` scheme), outline, width, point size |
 | Label | Pick an attribute in **Label**, then set text size and colour. The picker appears only when the layer has attributes |
+| Legend | The legend pane (bottom right) lists the legends of the visible layers; WMS legend images show at their native size and scroll. The toolbar's legend button hides or shows it, its header collapses it. It opens by default on maps at least 360 px tall and 600 px wide |
 | Edit features | **Edit features** opens an edit bar: Select, Point, Line, Polygon, Rectangle, Circle, Delete, Save, Cancel. Drag a selected feature to move it, or its vertices to reshape it |
 | Edit attributes | Draw or select a feature and an **Attributes** form appears top right. Change values, or type a name in **New attribute** and press Enter. Numbers and true/false values keep their type. Saved attributes become available to **Label** |
 | Sketch | The pencil button in the toolbar starts a new, empty sketch layer in polygon mode |
@@ -138,6 +159,8 @@ Set by an admin under Workspace, then Tools, then the gear icon on Map Visualize
 | `label_font` | `Noto Sans Regular` | Font stack name; must exist at `glyphs_url` |
 | `allow_private_networks` | `false` | Let `inspect_ogc_service` reach private or internal addresses |
 | `request_timeout` | `20` | Timeout in seconds for `inspect_ogc_service` |
+| `vision_model` | empty | Model that `look_at_map` sends the screenshot to. Empty = the chat's model (must accept images); `off` = layer states only, no screenshot |
+| `look_timeout` | `45` | Seconds `look_at_map` waits for the browser to answer |
 
 ## Security model
 
@@ -175,7 +198,8 @@ Relative URLs resolve against the Open WebUI origin.
 - WFS layers need GeoJSON output (`application/json`). Services that only offer GML will not work.
 - WMS `GetFeatureInfo` on click assumes the map is not rotated or pitched.
 - COG layers go through the public `titiler.xyz` demo server by default, which is rate-limited and not for production use. Run your own TiTiler and set `titiler_endpoint` for anything serious. The COG itself must be reachable by that server and send CORS headers.
-- One `show_map` call draws one new map. To change a map, the model calls it again with the full updated spec.
+- Every `update_map` shows the updated map as a new embed; the embed from the earlier reply is not changed in place.
+- `look_at_map` and `query_map` need the chat open in a browser. It does not work from the API or while the user has navigated away, and after a page reload the user may need to scroll to the map so it starts.
 - Large vector datasets are slow. Use `strategy: "bbox"`, `maxFeatures` or vector tiles.
 
 ## Troubleshooting
@@ -235,6 +259,12 @@ The browser could not fetch Terra Draw from `terra_draw_js_url`. Check that `unp
 </details>
 
 <details>
+<summary>look_at_map says it could not look at the map</summary>
+
+The tool asks the browser that is showing the chat for the map. It fails when the chat is not open, when the map's embed is not on the page (a different chat, or the message was deleted), or when the map has not started because it is off screen after a reload: scroll to it and ask again. If the chat's model does not accept images you still get the layer states; set `vision_model` to a vision-capable model, or to `off`.
+</details>
+
+<details>
 <summary>Send to chat does nothing</summary>
 
 It fills the message box of the chat the map belongs to, so it only works in the chat itself, not in the pop-out window. Older Open WebUI versions may ignore the request; use **Download** instead and attach the file.
@@ -254,6 +284,19 @@ It fills the message box of the chat the map belongs to, so it only works in the
 Complete, tested `show_map` arguments are in [`examples/`](examples/).
 
 ## Changelog
+
+**0.4.0**
+
+- `query_map`: the model identifies features at a location (vector attributes and WMS `GetFeatureInfo`), with the popup shown to the user.
+- Legend pane: legends moved out of the layer panel into their own card at the bottom right, WMS legend images at native size, visible layers only, toggled from the toolbar.
+- Pop-out window sends no referrer, so OpenStreetMap tiles no longer return 403 "Access blocked" there.
+- `look_at_map` reports tile failures as problems only for visible layers.
+
+**0.3.0**
+- Maps have ids and live per chat. `update_map` changes an existing map (layers by name or index, style merging, reordering, view) and shows it again; the model no longer resends the whole spec.
+- `look_at_map`: the model sees the map as rendered, with per-layer errors, feature counts, features in view, and a vision-model description of a screenshot. New valves `vision_model` and `look_timeout`.
+- `describe_map` lists a map's layers and view.
+- Map state is kept under `DATA_DIR/map_visualizer/`.
 
 **0.2.0**
 - Feature editing with Terra Draw: move, reshape, add and delete features, plus a sketch layer from the toolbar.
