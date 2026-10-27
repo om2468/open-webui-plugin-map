@@ -1698,11 +1698,23 @@ map.on('error', function (ev) {
   }
   if (!sid || !err) return;
   var e = entries.filter(function (x) { return x.key === sid; })[0];
-  if (e && e.state !== 'error' && !e.tileErrorShown) {
-    e.tileErrorShown = true;
-    e.note = 'Some tiles failed to load (' + (err.status ? 'HTTP ' + err.status : err.message || 'network/CORS') + ')';
-    renderPanel();
+  // odd tiles fail all the time (outside a WMS layer's extent, past its zoom range) while the rest draw
+  // fine; only report once the map settles with no tile of this layer loaded at all
+  if (e && e.state !== 'error' && !e.tileOk && !e.tileErr) {
+    e.tileErr = err.status ? 'HTTP ' + err.status : err.message || 'network/CORS';
+    map.once('idle', function () {
+      if (e.tileOk || e.state === 'error') return;
+      e.note = 'Tiles failed to load (' + e.tileErr + ')';
+      renderPanel();
+    });
   }
+});
+map.on('sourcedata', function (ev) {
+  if (!ev.tile || !ev.sourceId || ev.sourceId.indexOf('u-') !== 0) return;
+  var e = entries.filter(function (x) { return x.key === ev.sourceId; })[0];
+  if (!e || e.tileOk) return;
+  e.tileOk = true;
+  if (e.note && e.note.indexOf('Tiles failed') === 0) { e.note = null; renderPanel(); }
 });
 new ResizeObserver(function () { map.resize(); reportHeight(); }).observe(wrap);
 window.__mv = { map: map, entries: entries, startEdit: startEdit, finishEdit: finishEdit, startSketch: startSketch,
