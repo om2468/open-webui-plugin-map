@@ -2,12 +2,13 @@
 title: Map Visualizer
 author: om2468
 author_url: https://github.com/om2468
-version: 0.1.0
+version: 0.2.0
 required_open_webui_version: 0.6.0
 description: Renders interactive MapLibre maps inline in chat. The model builds the map from a JSON layer spec (XYZ/WMTS tiles, WMS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, COG, images, 3D buildings) on top of keyless open basemaps. Includes inspect_ogc_service to look up real WMS/WFS/WMTS layer names.
 """
 
 import asyncio
+import http.client
 import ipaddress
 import json
 import re
@@ -21,7 +22,7 @@ from typing import Literal, Optional
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-_MV_BUILD = "0.1.0"
+_MV_BUILD = "0.2.0"
 
 # ---------------------------------------------------------------------------
 # Basemap catalogue: keyless providers only (no API tokens required).
@@ -166,7 +167,34 @@ html, body { margin: 0; padding: 0; background: transparent; font-family: var(--
 .mv-head .mv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mv-body { overflow-y: auto; overflow-x: hidden; border-top: 1px solid var(--mv-border); }
 .mv-row .mv-btn.on { color: var(--mv-accent); }
-.mv-sym span { width: 48px; flex: none; }
+.mv-row[draggable=true] { cursor: grab; }
+.mv-row.mv-drop-above { box-shadow: inset 0 2px 0 var(--mv-accent); }
+.mv-row.mv-drop-below { box-shadow: inset 0 -2px 0 var(--mv-accent); }
+.mv-row.mv-dragging { opacity: .4; }
+.mv-grip { flex: none; width: 8px; color: var(--mv-muted); opacity: .35; cursor: grab; }
+.mv-row:hover .mv-grip { opacity: 1; }
+.mv-grip svg { width: 8px; height: 14px; display: block; fill: currentColor; }
+.mv-sym select { flex: 1; min-width: 0; font: inherit; font-size: 11px; color: inherit; background: var(--mv-bg);
+  border: 1px solid var(--mv-border); border-radius: 4px; padding: 1px 2px; }
+.mv-btn.mv-move { border: 1px solid var(--mv-border); font-size: 11px; padding: 2px 7px; }
+.mv-acts { flex-wrap: wrap; }
+#mv-editbar { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); width: max-content; z-index: 4; display: flex;
+  flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; padding: 5px 8px; max-width: calc(100% - 24px); }
+.mv-eb { font: inherit; font-size: 12px; color: inherit; background: transparent; border: 1px solid var(--mv-border);
+  border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.mv-eb:hover { background: var(--mv-hover); }
+.mv-eb.on { border-color: var(--mv-accent); color: var(--mv-accent); }
+.mv-eb-save { background: var(--mv-accent); border-color: var(--mv-accent); color: #fff; }
+.mv-eb-save:hover { background: var(--mv-accent); opacity: .9; }
+.mv-eb-title { font-weight: 600; margin-right: 4px; }
+.mv-eb-note { color: var(--mv-muted); font-size: 11px; }
+#mv-attrs { position: absolute; top: 50px; right: 50px; z-index: 4; width: 230px; max-height: calc(100% - 140px);
+  overflow-y: auto; padding: 6px 10px 8px; box-sizing: border-box; }
+.mv-attr { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.mv-attr span { width: 72px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mv-muted); }
+.mv-attr input { flex: 1; min-width: 0; font: inherit; font-size: 12px; color: inherit; background: transparent;
+  border: 1px solid var(--mv-border); border-radius: 4px; padding: 2px 5px; }
+.mv-sym span { width: 66px; flex: none; }
 .mv-sym input[type=range] { flex: 1; min-width: 0; }
 .mv-sym input[type=color] { width: 30px; height: 20px; padding: 0; border: 1px solid var(--mv-border); border-radius: 4px;
   background: none; cursor: pointer; }
@@ -277,17 +305,32 @@ var ICONS = {
   camera: '<svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   layers: '<svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>',
   popout: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v6H4V6h6"/></svg>',
-  style: '<svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>'
+  style: '<svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
+  draw: '<svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 7l3 3"/></svg>',
+  opacity: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>',
+  grip: '<svg viewBox="0 0 8 14"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>'
 };
 // pop-out copy of this page: fills its own window and starts at the view it was opened from
 var POPOUT = document.documentElement.hasAttribute('data-mv-popout');
-if (POPOUT) {
-  try {
-    var pv = JSON.parse(decodeURIComponent(document.getElementById('mv-config').getAttribute('data-view') || ''));
-    SPEC.center = pv.center; SPEC.zoom = pv.zoom; SPEC.pitch = pv.pitch; SPEC.bearing = pv.bearing;
-    delete SPEC.bounds;
-    if (pv.basemap) SPEC.basemap = pv.basemap;
-  } catch (e) {}
+// RESUME: view saved by the pop-out button (data-view) or by mvRelease before a reload (window.name)
+var RESUME = null;
+try {
+  if (POPOUT) RESUME = JSON.parse(decodeURIComponent(document.getElementById('mv-config').getAttribute('data-view') || ''));
+  else if (window.name.indexOf('mv:') === 0) RESUME = JSON.parse(window.name.slice(3));
+} catch (e) {}
+window.name = '';
+if (RESUME && RESUME.center) {
+  SPEC.center = RESUME.center; SPEC.zoom = RESUME.zoom; SPEC.pitch = RESUME.pitch; SPEC.bearing = RESUME.bearing;
+  delete SPEC.bounds;
+  if (RESUME.basemap) SPEC.basemap = RESUME.basemap;
+}
+// user edits and sketches come back as static GeoJSON layers at their original positions
+if (RESUME && RESUME.edits) {
+  SPEC.layers = SPEC.layers || [];
+  Object.keys(RESUME.edits).forEach(function (k) {
+    var d = RESUME.edits[k], base = SPEC.layers[+k] || { name: d.name, style: d.style };
+    SPEC.layers[+k] = Object.assign({}, base, { type: 'geojson', data: d.data, url: null, strategy: null });
+  });
 }
 
 // ---------- theme + height --------------------------------------------------
@@ -308,6 +351,7 @@ try {
 }
 function reportHeight() {
   var h = document.documentElement.scrollHeight;
+  if (h < 100) return;
   try { parent.postMessage({ type: 'iframe:height', height: h }, '*'); } catch (e) {}
   // older Open WebUI builds ignore iframe:height; with same-origin on we can size the frame directly
   try { if (window.frameElement) window.frameElement.style.height = h + 'px'; } catch (e) {}
@@ -519,11 +563,13 @@ var uid = 0;
 function newEntry(L, i) {
   var e = {
     key: 'u-' + (++uid),
+    idx: i,             // position in the spec; saved view state is keyed by it because users can reorder
+    labelField: (L.style && L.style.label) || '',
     spec: L,
     name: L.name || (L.type + ' ' + (i + 1)),
     type: L.type,
-    visible: L.visible !== false,
-    opacity: Math.max(0, Math.min(1, num(L.opacity, 1))),
+    visible: RESUME && RESUME.vis && RESUME.vis[i] !== undefined ? !!RESUME.vis[i] : L.visible !== false,
+    opacity: Math.max(0, Math.min(1, num(RESUME && RESUME.op ? RESUME.op[i] : L.opacity, 1))),
     color: (L.style && L.style.color) || LAYER_COLORS[i % LAYER_COLORS.length],
     layerIds: [],
     sym: {},            // MapLibre layer ids by role (fill, fill-extrusion, line, outline, circle, symbol) for the style editor
@@ -540,6 +586,7 @@ function newEntry(L, i) {
   return e;
 }
 function addMl(e, def, opProps) {
+  if (map.getLayer(def.id)) return;  // e.g. the editor adding symbols for a new geometry type
   def.layout = def.layout || {};
   def.layout.visibility = e.visible ? 'visible' : 'none';
   if (e.spec.minzoom !== undefined) def.minzoom = num(e.spec.minzoom, 0);
@@ -569,6 +616,8 @@ function setVisible(e, v) {
 }
 function restack() {
   entries.forEach(function (e) { e.layerIds.forEach(function (id) { if (map.getLayer(id)) map.moveLayer(id); }); });
+  // keep the feature editor's sketch layers above everything while editing
+  if (editor) map.getStyle().layers.forEach(function (l) { if (l.id.indexOf('mv-td') === 0) map.moveLayer(l.id); });
 }
 function fail(e, err) {
   e.state = 'error';
@@ -896,10 +945,15 @@ function addGeojson(e, gj) {
   if (!e.bounds) e.bounds = geojsonBounds(gj);
   var count = (gj.features || []).length;
   e.featureCount = count;
+  var keys = {};
+  (gj.features || []).slice(0, 500).forEach(function (f) { Object.keys(f.properties || {}).forEach(function (k) { keys[k] = 1; }); });
+  e.fields = Object.keys(keys);
+  e.data = gj;  // kept for the feature editor, download and send-to-chat
   if (map.getSource(e.key)) { map.getSource(e.key).setData(gj); return; }
   map.addSource(e.key, { type: 'geojson', data: gj, attribution: e.spec.attribution || '' });
   var kinds = geomKinds(gj);
-  if (!Object.keys(kinds).length) kinds = null;
+  if (!Object.keys(kinds).length) kinds = null;  // empty: create symbols for every geometry type
+  e.kinds = kinds;
   addVectorLayers(e, e.key, null, gj, null, kinds);
 }
 
@@ -982,6 +1036,7 @@ function entryForLayerId(id) {
   for (var i = 0; i < entries.length; i++) if (entries[i].layerIds.indexOf(id) >= 0) return entries[i];
 }
 map.on('click', function (ev) {
+  if (editor) return;  // clicks belong to the feature editor
   var ids = [];
   entries.forEach(function (e) { if (e.visible && e.interactive) ids = ids.concat(e.layerIds.filter(function (id) { return map.getLayer(id); })); });
   var feats = ids.length ? map.queryRenderedFeatures(ev.point, { layers: ids }) : [];
@@ -1057,6 +1112,7 @@ function thumbStyle(bm) {
   return 'background:linear-gradient(135deg,#e5e7eb,#cbd5e1)';
 }
 function setBasemap(bm) {
+  if (editor) finishEdit(true);  // the editor's own layers would not survive the style swap
   currentBasemap = bm;
   map.setStyle(styleTarget(bm), {
     diff: false,
@@ -1076,7 +1132,13 @@ function setBasemap(bm) {
 }
 // symbology editor (vector layers): colour, outline colour, line width, point size
 function styleControls(e, det) {
-  var S = e.sym;
+  // only the symbol roles the layer's data actually uses (a polygon sketch has no point size)
+  var S = e.sym, kinds = e.data ? geomKinds(e.data) : null;
+  if (kinds) {
+    var need = { fill: 'Polygon', 'fill-extrusion': 'Polygon', outline: 'Polygon', line: 'LineString', circle: 'Point' };
+    S = {};
+    Object.keys(e.sym).forEach(function (r) { if (!need[r] || kinds[need[r]]) S[r] = e.sym[r]; });
+  }
   function first(roles) { for (var i = 0; i < roles.length; i++) if (S[roles[i]]) return S[roles[i]][0]; }
   function cur(id, prop, fb) {
     var v = id ? map.getPaintProperty(id, prop) : null;
@@ -1084,7 +1146,7 @@ function styleControls(e, det) {
     return typeof v === 'number' ? v : fb;
   }
   function apply(pairs, v) {
-    pairs.forEach(function (p) { (S[p[0]] || []).forEach(function (id) { try { map.setPaintProperty(id, p[1], v); } catch (err) {} }); });
+    pairs.forEach(function (p) { (e.sym[p[0]] || []).forEach(function (id) { try { map.setPaintProperty(id, p[1], v); } catch (err) {} }); });
   }
   function row(label, input) { det.appendChild(el('div', { 'class': 'mv-legend-item mv-sym' }, [el('span', { text: label }), input])); }
   var fillish = first(['fill', 'fill-extrusion', 'line', 'circle']);
@@ -1116,7 +1178,78 @@ function styleControls(e, det) {
     r.addEventListener('input', function () { apply([['circle', 'circle-radius']], +r.value); });
     row('Size', r);
   }
+  if (!fillish) return;  // labels only for vector layers
+  var fields = layerFields(e);
+  if (!fields.length) return;  // nothing to label with (e.g. a fresh sketch); attributes are added in the editor
+  var sel =el('select', { title: 'Label features with this attribute' }, [el('option', { value: '', text: '(none)' })]);
+  fields.forEach(function (f) { sel.appendChild(el('option', { value: f, text: f })); });
+  sel.value = e.labelField;
+  sel.addEventListener('change', function () { setLabel(e, sel.value); renderPanel(); });
+  row('Label', sel);
+  if (e.labelField && S.symbol) {
+    var ls = el('input', { type: 'range', min: '8', max: '28', step: '1', title: 'Label size', value: String(map.getLayoutProperty(S.symbol[0], 'text-size') || 12) });
+    ls.addEventListener('input', function () { S.symbol.forEach(function (id) { map.setLayoutProperty(id, 'text-size', +ls.value); }); });
+    row('Text size', ls);
+    var lc = el('input', { type: 'color', title: 'Label colour', value: cur(S.symbol[0], 'text-color', '#111827') });
+    lc.addEventListener('input', function () { apply([['symbol', 'text-color']], lc.value); });
+    row('Text colour', lc);
+  }
 }
+// attribute names for the label picker: from the loaded data, or sampled from what is on screen (tiles)
+function layerFields(e) {
+  var keys = {};
+  (e.fields || []).forEach(function (k) { keys[k] = 1; });
+  if (!e.fields) {
+    var ids = e.layerIds.filter(function (id) { return map.getLayer(id); });
+    try {
+      map.queryRenderedFeatures({ layers: ids }).slice(0, 300).forEach(function (f) {
+        Object.keys(f.properties || {}).forEach(function (k) { keys[k] = 1; });
+      });
+    } catch (err) {}
+  }
+  if (e.labelField) keys[e.labelField] = 1;
+  return Object.keys(keys).sort();
+}
+function setLabel(e, field) {
+  e.labelField = field;
+  var S = e.sym;
+  if (S.symbol) {  // '' hides the text but keeps the layer, so show/hide of the whole entry still works
+    S.symbol.forEach(function (id) { map.setLayoutProperty(id, 'text-field', field ? ['to-string', ['get', field]] : ''); });
+    return;
+  }
+  if (!field) return;
+  // one label layer per source (and source-layer) the entry draws from
+  var seen = {}, n = 0;
+  e.layerIds.slice().forEach(function (id) {
+    var l = map.getLayer(id);
+    if (!l || l.type === 'symbol' || l.type === 'raster') return;
+    var k = l.source + '|' + (l.sourceLayer || '');
+    if (seen[k]) return;
+    seen[k] = 1;
+    var def = { id: e.key + '-lbl' + (++n), type: 'symbol', source: l.source,
+      // variable anchor + radial offset keeps point labels beside their symbol instead of on top of it
+      layout: { 'text-field': ['to-string', ['get', field]], 'text-font': [CFG.font], 'text-size': 12, 'text-max-width': 10,
+        'text-variable-anchor': ['top', 'bottom', 'left', 'right'], 'text-radial-offset': 0.9 },
+      paint: { 'text-color': '#111827', 'text-halo-color': '#ffffff', 'text-halo-width': 1.4 } };
+    if (l.sourceLayer) def['source-layer'] = l.sourceLayer;
+    if (l.minzoom) def.minzoom = l.minzoom;
+    addMl(e, def, ['text-opacity']);
+  });
+  restack();
+}
+// drag-and-drop in the panel; entries[0] is the bottom layer and the panel lists top first,
+// so dropping "above" a row means drawing over that layer
+function moveEntry(e, target, above) {
+  if (e === target || entries.indexOf(e) < 0) return;
+  entries.splice(entries.indexOf(e), 1);
+  var t = entries.indexOf(target);
+  entries.splice(above ? t + 1 : t, 0, e);
+  restack();
+  renderPanel();
+}
+// raster layers (WMS, WMTS, XYZ, COG, images) are styled by their server: only opacity applies
+function styleable(e) { return Object.keys(e.sym).some(function (r) { return r !== 'raster'; }); }
+var dragEntry = null;
 function renderPanel() {
   panel.innerHTML = '';
   panel.className = 'mv-card' + (collapsed ? ' collapsed' : '');
@@ -1142,9 +1275,36 @@ function renderPanel() {
       var zoomBtn = el('button', { 'class': 'mv-btn', title: 'Zoom to layer', html: ICONS.zoom, onclick: function () { zoomTo(e); } });
       if (!e.bounds) zoomBtn.style.visibility = 'hidden';
       function toggle() { openDetails[e.key] = !openDetails[e.key]; renderPanel(); }
-      var nameEl = el('span', { 'class': 'mv-name', text: e.name, title: e.name + ' (' + e.type + ') – click for opacity and style', onclick: toggle });
-      var styleBtn = el('button', { 'class': 'mv-btn' + (openDetails[e.key] ? ' on' : ''), title: 'Opacity and style', html: ICONS.style, onclick: toggle });
-      sec.appendChild(el('div', { 'class': 'mv-row' }, [cb, sw, nameEl, styleBtn, zoomBtn]));
+      var vec = styleable(e), what = vec ? 'Opacity and style' : 'Opacity';
+      var nameEl = el('span', { 'class': 'mv-name', text: e.name, title: e.name + ' (' + e.type + ') – click for ' + what.toLowerCase(), onclick: toggle });
+      var styleBtn = el('button', { 'class': 'mv-btn' + (openDetails[e.key] ? ' on' : ''), title: what, html: vec ? ICONS.style : ICONS.opacity, onclick: toggle });
+      var multi = entries.length > 1;
+      var rowEl = el('div', { 'class': 'mv-row', draggable: multi ? 'true' : 'false' },
+        [multi ? el('span', { 'class': 'mv-grip', title: 'Drag to reorder', html: ICONS.grip }) : null, cb, sw, nameEl, styleBtn, zoomBtn]);
+      function dropAbove(ev) { var r = rowEl.getBoundingClientRect(); return ev.clientY < r.top + r.height / 2; }
+      function clearDrop() { rowEl.classList.remove('mv-drop-above', 'mv-drop-below'); }
+      rowEl.addEventListener('dragstart', function (ev) {
+        dragEntry = e;
+        rowEl.classList.add('mv-dragging');
+        ev.dataTransfer.effectAllowed = 'move';
+        try { ev.dataTransfer.setData('text/plain', e.key); } catch (err) {}
+      });
+      rowEl.addEventListener('dragover', function (ev) {
+        if (!dragEntry || dragEntry === e) return;
+        ev.preventDefault();
+        var above = dropAbove(ev);
+        rowEl.classList.toggle('mv-drop-above', above);
+        rowEl.classList.toggle('mv-drop-below', !above);
+      });
+      rowEl.addEventListener('dragleave', clearDrop);
+      rowEl.addEventListener('drop', function (ev) {
+        ev.preventDefault();
+        clearDrop();
+        if (dragEntry && dragEntry !== e) moveEntry(dragEntry, e, dropAbove(ev));
+        dragEntry = null;
+      });
+      rowEl.addEventListener('dragend', function () { dragEntry = null; rowEl.classList.remove('mv-dragging'); });
+      sec.appendChild(rowEl);
       if (e.error) sec.appendChild(el('div', { 'class': 'mv-err', text: e.error }));
       else if (e.note) sec.appendChild(el('div', { 'class': 'mv-err', style: 'color:var(--mv-muted)', text: e.note }));
       var det = el('div', { 'class': 'mv-detail' + (openDetails[e.key] || e.legend || e.legendUrl ? ' open' : '') });
@@ -1152,8 +1312,15 @@ function renderPanel() {
         var rng = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(e.opacity * 100)), title: 'Opacity',
           oninput: function () { e.opacity = rng.value / 100; applyOpacity(e); } });
         det.appendChild(el('div', { 'class': 'mv-legend-item' }, ['Opacity', rng]));
-        styleControls(e, det);
-        if (e.featureCount !== undefined) det.appendChild(el('div', { 'class': 'mv-legend-item', text: e.featureCount + ' features' }));
+        if (vec) styleControls(e, det);
+        if (editable(e)) {
+          var acts = [];
+          if (!(editor && editor.entry === e)) acts.push(el('button', { 'class': 'mv-btn mv-move', text: 'Edit features', onclick: function () { startEdit(e); } }));
+          acts.push(el('button', { 'class': 'mv-btn mv-move', text: 'Download', title: 'Download as GeoJSON', onclick: function () { downloadGeojson(e); } }));
+          if (!POPOUT) acts.push(el('button', { 'class': 'mv-btn mv-move', text: 'Send to chat', title: 'Put this layer into the chat box as GeoJSON', onclick: function () { sendToChat(e); } }));
+          det.appendChild(el('div', { 'class': 'mv-legend-item mv-acts' }, acts));
+        }
+        if (e.featureCount !== undefined) det.appendChild(el('div', { 'class': 'mv-legend-item', text: e.featureCount + (e.featureCount === 1 ? ' feature' : ' features') }));
       }
       if (e.legend) {
         var lg = el('div', { 'class': 'mv-legend' });
@@ -1203,14 +1370,41 @@ function toolBtn(icon, title, fn) { var b = el('button', { 'class': 'mv-btn', ti
 toolBtn(ICONS.home, 'Reset view', function () { fitInitial(true); });
 var globeBtn = toolBtn(ICONS.globe, 'Globe projection', function (b) { globeOn = !globeOn; setGlobe(); b.classList.toggle('on', globeOn); });
 var terrainBtn = toolBtn(ICONS.mountain, '3D terrain', function (b) { setTerrain(!terrainOn); b.classList.toggle('on', terrainOn); });
+toolBtn(ICONS.draw, 'Draw a sketch layer', function () { startSketch(); });
 toolBtn(ICONS.camera, 'Save as PNG', function () { exportPng(); });
 if (!POPOUT && window.mvPageHtml) toolBtn(ICONS.popout, 'Open in a new window', function () { popOut(); });
 globeBtn.classList.toggle('on', globeOn);
 
-function popOut() {
+function viewState() {
   var c = map.getCenter();
-  var view = { center: [c.lng, c.lat], zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing(),
-    basemap: basemapIndex[String(currentBasemap.id).toLowerCase()] ? currentBasemap.id : null };
+  return { center: [c.lng, c.lat], zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing(),
+    basemap: basemapIndex[String(currentBasemap.id).toLowerCase()] ? currentBasemap.id : null,
+    vis: byIdx(function (e) { return e.visible ? 1 : 0; }), op: byIdx(function (e) { return e.opacity; }),
+    order: entries.map(function (e) { return e.idx; }), edits: editedData() };
+}
+function editedData() {
+  var out = {};
+  entries.forEach(function (e) { if (e.edited && e.data) out[e.idx] = { name: e.name, data: e.data, style: e.spec.style }; });
+  return out;
+}
+function byIdx(fn) {
+  var out = [];
+  entries.forEach(function (e) { out[e.idx] = fn(e); });
+  return out;
+}
+// Browsers keep only ~16 WebGL contexts per page, so a long chat of maps would lose the oldest ones.
+// BOOT_SCRIPT calls this after a map has been off screen for a while (or lost its context): save the
+// view, then reload into the unstarted state, which holds no context until it scrolls back into view.
+window.mvRelease = function () {
+  if (editor) finishEdit(true);
+  try { window.name = 'mv:' + JSON.stringify(viewState()); } catch (e) {}
+  location.reload();
+};
+map.getCanvas().addEventListener('webglcontextlost', function () { window.mvLost = true; });
+
+function popOut() {
+  if (editor) finishEdit(true);
+  var view = viewState();
   var html = window.mvPageHtml.replace('<html ', '<html data-mv-popout="1" ')
     .replace('id="mv-config">', 'id="mv-config" data-view="' + encodeURIComponent(JSON.stringify(view)) + '">');
   var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
@@ -1245,6 +1439,202 @@ function exportPng() {
   map.triggerRepaint();
 }
 
+// ---------- feature editing (Terra Draw, loaded on first use) ----------------------------------
+var editor = null;  // { entry, draw, kept: features Terra Draw cannot edit, mode }
+var DRAW_MODES = { point: 1, linestring: 1, polygon: 1, rectangle: 1, circle: 1 };
+var TD_PROPS = ['mode', 'selected', 'edited', 'currentlyDrawing', 'committedCoordinateCount', 'provisionalCoordinateCount',
+  'radiusKilometers', 'closingPoint', 'snappingPoint', 'midPoint', 'selectionPoint', 'coordinatePoint', 'coordinatePointIds', 'markerPoint'];
+var sketchCount = 0;
+var editBar = el('div', { id: 'mv-editbar', 'class': 'mv-card' });
+editBar.style.display = 'none';
+wrap.appendChild(editBar);
+var attrBox = el('div', { id: 'mv-attrs', 'class': 'mv-card' });
+attrBox.style.display = 'none';
+// keys typed into the form must not reach Terra Draw's shortcuts (Delete removes the feature)
+attrBox.addEventListener('keydown', function (ev) { ev.stopPropagation(); });
+wrap.appendChild(attrBox);
+
+function editable(e) { return !!(e.data && !e.reload && e.state === 'ready'); }
+function loadEditorLibs() {
+  if (window.terraDraw && window.terraDrawMaplibreGlAdapter) return Promise.resolve();
+  return window.mvLoadScript(CFG.terraDrawJs).then(function () { return window.mvLoadScript(CFG.terraDrawAdapterJs); });
+}
+function startEdit(e, mode) {
+  if (editor) finishEdit(true);
+  e.note = 'Loading the editor…';
+  renderPanel();
+  loadEditorLibs().then(function () {
+    e.note = null;
+    var TD = window.terraDraw, n = 0;
+    var vertices = { feature: { draggable: true, coordinates: { midpoints: true, draggable: true, deletable: true } } };
+    var whole = { feature: { draggable: true } };
+    var draw = new TD.TerraDraw({
+      adapter: new window.terraDrawMaplibreGlAdapter.TerraDrawMapLibreGLAdapter({ map: map, prefixId: 'mv-td' }),
+      // the default strategy only accepts UUIDs; our ids are simple strings
+      idStrategy: { isValidId: function (id) { return typeof id === 'string' && id.length > 0; },
+        getId: function () { return 'td-' + Date.now().toString(36) + '-' + (++n); } },
+      modes: [
+        new TD.TerraDrawSelectMode({ flags: { point: whole, linestring: vertices, polygon: vertices, rectangle: whole, circle: whole } }),
+        new TD.TerraDrawPointMode(), new TD.TerraDrawLineStringMode(), new TD.TerraDrawPolygonMode(),
+        new TD.TerraDrawRectangleMode(), new TD.TerraDrawCircleMode()
+      ]
+    });
+    draw.start();
+    // Terra Draw edits single Points, LineStrings and Polygons; multi-part or invalid features are kept as they are
+    var kept = [], load = [], orig = [];
+    (e.data.features || []).forEach(function (f, i) {
+      var g = f.geometry, m = g && { Point: 'point', LineString: 'linestring', Polygon: 'polygon' }[g.type];
+      if (!m) { kept.push(f); return; }
+      load.push({ type: 'Feature', id: 'f-' + i, geometry: JSON.parse(JSON.stringify(g)), properties: Object.assign({}, f.properties, { mode: m }) });
+      orig.push(f);
+    });
+    if (load.length) draw.addFeatures(load).forEach(function (r, i) { if (!r.valid) kept.push(orig[i]); });
+    e.layerIds.forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
+    // props: attribute edits by feature id, applied on save; extra: attribute names the user added
+    editor = { entry: e, draw: draw, kept: kept, props: {}, extra: [], sel: null };
+    function showAttrs(id) { if (editor && editor.draw === draw) { editor.sel = id; renderAttrs(); } }
+    draw.on('select', showAttrs);
+    draw.on('finish', showAttrs);  // a feature just drawn gets its form straight away
+    draw.on('deselect', function () { showAttrs(null); });
+    setEditMode(mode || 'select');
+    renderPanel();
+  }, function () {
+    e.note = null;
+    e.error = 'Could not load the feature editor from ' + CFG.terraDrawJs;
+    renderPanel();
+  });
+}
+function setEditMode(m) {
+  if (!editor) return;
+  editor.mode = m;
+  editor.draw.setMode(m);
+  renderEditBar();
+}
+function deleteSelected() {
+  if (!editor) return;
+  var ids = editor.draw.getSnapshot().filter(function (f) { return f.properties.selected; }).map(function (f) { return f.id; });
+  if (ids.length) editor.draw.removeFeatures(ids);
+}
+function finishEdit(save) {
+  if (!editor) return;
+  var ed = editor, e = ed.entry;
+  editor = null;
+  if (save) {
+    var feats = ed.draw.getSnapshot().filter(function (f) {
+      var p = f.properties;
+      return DRAW_MODES[p.mode] && !p.midPoint && !p.selectionPoint && !p.coordinatePoint;
+    }).map(function (f) {
+      var p = Object.assign({}, f.properties, ed.props[f.id] || {});
+      TD_PROPS.forEach(function (k) { delete p[k]; });
+      return { type: 'Feature', properties: p, geometry: f.geometry };
+    }).concat(ed.kept);
+    var fc = { type: 'FeatureCollection', features: feats };
+    e.edited = true;
+    e.bounds = geojsonBounds(fc);
+    addGeojson(e, fc);
+    // a geometry type the layer did not have before needs its own symbols
+    var kinds = geomKinds(fc), missing = {}, any = false;
+    if (e.kinds) Object.keys(kinds).forEach(function (k) { if (!e.kinds[k]) { missing[k] = true; e.kinds[k] = true; any = true; } });
+    if (any) addVectorLayers(e, e.key, null, fc, null, missing);
+  }
+  ed.draw.stop();
+  e.layerIds.forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', e.visible ? 'visible' : 'none'); });
+  restack();
+  renderEditBar();
+  renderAttrs();
+  renderPanel();
+}
+// attribute form for the selected (or just drawn) feature
+function featureProps(id) {
+  var f = editor.draw.getSnapshot().filter(function (x) { return x.id === id; })[0];
+  if (!f || !DRAW_MODES[f.properties.mode]) return null;
+  var p = Object.assign({}, f.properties, editor.props[id] || {});
+  TD_PROPS.forEach(function (k) { delete p[k]; });
+  return p;
+}
+function typedValue(s, old) {
+  if (typeof old === 'number' && s.trim() !== '' && isFinite(Number(s))) return Number(s);
+  if (typeof old === 'boolean' && (s === 'true' || s === 'false')) return s === 'true';
+  if (old && typeof old === 'object') { try { return JSON.parse(s); } catch (err) {} }
+  return s;
+}
+function renderAttrs() {
+  attrBox.innerHTML = '';
+  var p = editor && editor.sel !== null && editor.sel !== undefined ? featureProps(editor.sel) : null;
+  if (!p) { attrBox.style.display = 'none'; return; }
+  attrBox.style.display = '';
+  var id = editor.sel;
+  function set(k, v) { (editor.props[id] = editor.props[id] || {})[k] = v; }
+  // every attribute the layer uses, so features can fill in fields they lack
+  var keys = Object.keys(p);
+  (editor.entry.fields || []).concat(editor.extra).forEach(function (k) { if (keys.indexOf(k) < 0) keys.push(k); });
+  attrBox.appendChild(el('div', { 'class': 'mv-label', text: 'Attributes' }));
+  if (!keys.length) attrBox.appendChild(el('div', { 'class': 'mv-eb-note', text: 'No attributes yet. Add one, e.g. name.' }));
+  keys.forEach(function (k) {
+    var v = p[k], inp = el('input', { type: 'text', value: v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v) });
+    inp.addEventListener('input', function () { set(k, typedValue(inp.value, v)); });
+    attrBox.appendChild(el('label', { 'class': 'mv-attr' }, [el('span', { text: k, title: k }), inp]));
+  });
+  var nk = el('input', { type: 'text', placeholder: 'New attribute' });
+  function add() {
+    var k = nk.value.trim();
+    if (!k || keys.indexOf(k) >= 0 || TD_PROPS.indexOf(k) >= 0) return;
+    editor.extra.push(k);
+    set(k, '');
+    renderAttrs();
+    var ins = attrBox.querySelectorAll('.mv-attr input');
+    if (ins.length > 1) ins[ins.length - 2].focus();  // straight into the new attribute's value
+  }
+  nk.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') add(); });
+  attrBox.appendChild(el('div', { 'class': 'mv-attr' }, [nk, el('button', { 'class': 'mv-eb', text: 'Add', onclick: add })]));
+  if (!keys.length) nk.focus();
+}
+function renderEditBar() {
+  editBar.innerHTML = '';
+  if (!editor) { editBar.style.display = 'none'; return; }
+  editBar.style.display = '';
+  editBar.appendChild(el('span', { 'class': 'mv-eb-title', text: editor.entry.name }));
+  [['select', 'Select'], ['point', 'Point'], ['linestring', 'Line'], ['polygon', 'Polygon'], ['rectangle', 'Rectangle'], ['circle', 'Circle']].forEach(function (m) {
+    editBar.appendChild(el('button', { 'class': 'mv-eb' + (editor.mode === m[0] ? ' on' : ''), text: m[1], onclick: function () { setEditMode(m[0]); } }));
+  });
+  editBar.appendChild(el('button', { 'class': 'mv-eb', text: 'Delete', title: 'Delete the selected feature (or press Delete)', onclick: deleteSelected }));
+  editBar.appendChild(el('button', { 'class': 'mv-eb mv-eb-save', text: 'Save', onclick: function () { finishEdit(true); } }));
+  editBar.appendChild(el('button', { 'class': 'mv-eb', text: 'Cancel', onclick: function () { finishEdit(false); } }));
+  if (editor.kept.length) editBar.appendChild(el('span', { 'class': 'mv-eb-note', text: editor.kept.length + ' multi-part or invalid feature(s) kept unchanged' }));
+}
+function startSketch() {
+  var L = { type: 'geojson', name: 'Sketch ' + (++sketchCount), data: { type: 'FeatureCollection', features: [] }, style: { color: '#ea580c' } };
+  SPEC.layers = SPEC.layers || [];
+  SPEC.layers.push(L);
+  var e = newEntry(L, SPEC.layers.length - 1);
+  addGeojson(e, L.data);
+  done(e);
+  e.edited = true;
+  startEdit(e, 'polygon');
+}
+function safeName(s) { return String(s || 'layer').replace(/[^a-z0-9-_ ]/gi, '').trim() || 'layer'; }
+function downloadGeojson(e) {
+  var url = URL.createObjectURL(new Blob([JSON.stringify(e.data)], { type: 'application/geo+json' }));
+  var a = el('a', { href: url, download: safeName(e.name) + '.geojson' });
+  document.body.appendChild(a); a.click(); a.remove();
+}
+// Hands the layer to the conversation: Open WebUI's input:prompt message fills the chat box from an
+// embed without sending it, so the user reviews (and can edit) the text before the model sees it.
+function sendToChat(e) {
+  var round = function (k, v) { return typeof v === 'number' ? Math.round(v * 1e6) / 1e6 : v; };
+  var feats = e.data.features || [], used = feats, json = JSON.stringify({ type: 'FeatureCollection', features: feats }, round);
+  while (json.length > 30000 && used.length > 1) {
+    used = used.slice(0, Math.floor(used.length / 2));
+    json = JSON.stringify({ type: 'FeatureCollection', features: used }, round);
+  }
+  var text = 'Here is the "' + e.name + '" layer from the map' + (e.edited ? ' with my edits' : '') + ' as GeoJSON' +
+    (used.length < feats.length ? ' (first ' + used.length + ' of ' + feats.length + ' features)' : '') + ':\n```json\n' + json + '\n```\n';
+  try { parent.postMessage({ type: 'input:prompt', text: text }, '*'); } catch (err) {}
+  e.note = 'Put into the chat box: review it, add your question and send';
+  renderPanel();
+  setTimeout(function () { if (e.note && e.note.indexOf('chat box') > 0) { e.note = null; renderPanel(); } }, 6000);
+}
+
 // ---------- view fitting ----------------------------------------------------------------
 function zoomTo(e) {
   if (!e.bounds) return;
@@ -1277,6 +1667,7 @@ map.on('style.load', function () {
   bootDone = true;
   if (globeOn) setGlobe();
   var pending = (SPEC.layers || []).map(function (L, i) {
+    if (!L) return Promise.resolve();
     var e = newEntry(L, i);
     var fn = loaders[L.type];
     if (!fn) { fail(e, new Error('Unknown layer type "' + L.type + '"')); return Promise.resolve(); }
@@ -1284,6 +1675,10 @@ map.on('style.load', function () {
     try { r = fn(e); } catch (err) { fail(e, err); return Promise.resolve(); }
     return Promise.resolve(r).then(function () { if (e.state !== 'error') done(e); restack(); }).catch(function (err) { fail(e, err); });
   });
+  if (RESUME && RESUME.order) {  // keep the user's drag-and-drop order across release and pop-out
+    entries.sort(function (a, b) { return RESUME.order.indexOf(a.idx) - RESUME.order.indexOf(b.idx); });
+    restack();
+  }
   renderPanel();
   if (SPEC.terrain) setTerrain(true);
   if (SPEC.bounds || SPEC.center) fitInitial(false);
@@ -1310,7 +1705,8 @@ map.on('error', function (ev) {
   }
 });
 new ResizeObserver(function () { map.resize(); reportHeight(); }).observe(wrap);
-window.__mv = { map: map, entries: entries };
+window.__mv = { map: map, entries: entries, startEdit: startEdit, finishEdit: finishEdit, startSketch: startSketch,
+  get editor() { return editor; } };
 })();
 """
 
@@ -1324,11 +1720,13 @@ BOOT_SCRIPT = r"""
   var msg = document.getElementById('mv-msg');
   function report() {
     var h = document.documentElement.scrollHeight;
+    if (h < 100) return; // not laid out yet; a 0 would collapse the iframe so it never scrolls into view
     try { parent.postMessage({ type: 'iframe:height', height: h }, '*'); } catch (e) {}
     try { if (window.frameElement) window.frameElement.style.height = h + 'px'; } catch (e) {}
   }
   report();
   window.addEventListener('load', report);
+  window.mvLoadScript = function (url) { return load(url); };  // used by the feature editor
   function load(url) {
     return new Promise(function (resolve, reject) {
       var s = document.createElement('script');
@@ -1344,16 +1742,35 @@ BOOT_SCRIPT = r"""
   css.rel = 'stylesheet';
   css.href = CFG.maplibreCss;
   document.head.appendChild(css);
-  // PMTiles failing only breaks pmtiles layers (they report it), not the whole map
-  var pm = CFG.pmtilesJs ? load(CFG.pmtilesJs).catch(function () {}) : Promise.resolve();
-  load(CFG.maplibreJs).then(function () { return pm; }).then(function () {
-    window.mvMain();
-  }, function () {
-    msg.className = 'mv-fail';
-    msg.textContent = 'Could not load MapLibre GL from ' + CFG.maplibreJs + '. The browser may be blocking that host ' +
-      '(proxy, firewall or Content Security Policy). An admin can self-host MapLibre and set the maplibre_js_url / maplibre_css_url valves.';
-    report();
-  });
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    // PMTiles failing only breaks pmtiles layers (they report it), not the whole map
+    var pm = CFG.pmtilesJs ? load(CFG.pmtilesJs).catch(function () {}) : Promise.resolve();
+    load(CFG.maplibreJs).then(function () { return pm; }).then(function () {
+      window.mvMain();
+    }, function () {
+      msg.className = 'mv-fail';
+      msg.textContent = 'Could not load MapLibre GL from ' + CFG.maplibreJs + '. The browser may be blocking that host ' +
+        '(proxy, firewall or Content Security Policy). An admin can self-host MapLibre and set the maplibre_js_url / maplibre_css_url valves.';
+      report();
+    });
+  }
+  // Start only once scrolled into view and release after a while off screen (see mvRelease):
+  // reopening a long chat must not create one WebGL context per map.
+  var wrap = document.getElementById('mv-wrap'), hideTimer = 0;
+  if (!window.IntersectionObserver || document.documentElement.hasAttribute('data-mv-popout')) { start(); return; }
+  new IntersectionObserver(function (items) {
+    var visible = items[items.length - 1].isIntersecting;
+    clearTimeout(hideTimer);
+    if (visible) {
+      if (!started) start();
+      else if (window.mvLost && window.mvRelease) window.mvRelease(); // context dropped while away: rebuild
+    } else if (started) {
+      hideTimer = setTimeout(function () { if (window.mvRelease) window.mvRelease(); }, CFG.releaseMs || 60000);
+    }
+  }).observe(wrap);
 })();
 """
 
@@ -1574,7 +1991,8 @@ def _csp_tag(valves) -> str:
     hosts = []
     for p in _host_patterns(valves.allowed_hosts):
         hosts.append(p if p == "*" else f"https://{p}")
-    for u in (valves.maplibre_js_url, valves.pmtiles_js_url, valves.maplibre_css_url, valves.titiler_endpoint):
+    for u in (valves.maplibre_js_url, valves.pmtiles_js_url, valves.maplibre_css_url, valves.titiler_endpoint,
+              valves.terra_draw_js_url, valves.terra_draw_adapter_js_url):
         parts = urllib.parse.urlsplit(u)
         if parts.scheme and parts.netloc:
             hosts.append(f"{parts.scheme}://{parts.netloc}")
@@ -1617,6 +2035,8 @@ def _build_html(spec: dict, valves) -> str:
         "overtureCatalog": OVERTURE_CATALOG,
         "overtureBuildings": OVERTURE_BUILDINGS,
         "maplibreJs": valves.maplibre_js_url,
+        "terraDrawJs": valves.terra_draw_js_url,
+        "terraDrawAdapterJs": valves.terra_draw_adapter_js_url,
     }
     config["maplibreCss"] = valves.maplibre_css_url
     if any(layer["type"] == "pmtiles" or (layer["type"] == "buildings" and str(layer.get("source") or "").lower() == "overture")
@@ -1656,7 +2076,9 @@ def _summarise(spec: dict, warnings: list, rejected: list) -> str:
         lines.append("Warnings:")
         lines.extend(f"  - {w}" for w in warnings)
     lines.append(
-        "The user can toggle layers, change opacity and switch basemaps in the map panel. "
+        "The user can toggle, reorder and restyle layers, label them, switch basemaps, draw sketches and edit "
+        "GeoJSON/WFS/OGC API features in the map panel; 'Send to chat' puts a layer's GeoJSON into their next message, "
+        "which you can reuse as an inline geojson layer. "
         "Layers that fail in the browser (CORS, bad layer names, HTTP errors) show a red error in that panel; "
         "you cannot see it, so if the user reports a problem use inspect_ogc_service to check names. "
         "To change the map, call show_map again with the full updated spec. "
@@ -1670,23 +2092,67 @@ def _summarise(spec: dict, warnings: list, rejected: list) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _public_addresses(host: str, port: int) -> list:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve host {host}: {exc}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global:
+            raise ValueError(
+                f"Host {host} resolves to a non-public address ({ip}). "
+                "An admin can enable 'allow_private_networks' to inspect internal services."
+            )
+    return infos
+
+
 def _check_public(url: str, allow_private: bool) -> None:
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("Only absolute http(s) URLs are supported")
     if allow_private:
         return
-    try:
-        infos = socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
-    except socket.gaierror as exc:
-        raise ValueError(f"Cannot resolve host {parts.hostname}: {exc}") from exc
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        if not ip.is_global:
-            raise ValueError(
-                f"Host {parts.hostname} resolves to a non-public address ({ip}). "
-                "An admin can enable 'allow_private_networks' to inspect internal services."
-            )
+    _public_addresses(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
+
+
+def _pinned_socket(conn) -> socket.socket:
+    # Connect to the very address that passed the public-IP check, so a DNS answer that changes
+    # between check and connect (DNS rebinding) cannot point the request at an internal host.
+    infos = _public_addresses(conn.host, conn.port)
+    err = None
+    for family, socktype, proto, _, addr in infos:
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(conn.timeout if conn.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT else None)
+            sock.connect(addr)
+            return sock
+        except OSError as exc:
+            err = exc
+            sock.close()
+    raise err or OSError(f"Cannot connect to {conn.host}")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = _pinned_socket(self)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        if self._tunnel_host:  # via a proxy: the proxy resolves the target, nothing to pin
+            return super().connect()
+        self.sock = self._context.wrap_socket(_pinned_socket(self), server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(http.client.HTTPConnection if req.has_proxy() else _PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
 
 
 class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
@@ -1700,7 +2166,10 @@ class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
 
 def _http_get(url: str, allow_private: bool, timeout: int, max_bytes: int = 8_000_000) -> bytes:
     _check_public(url, allow_private)
-    opener = urllib.request.build_opener(_GuardedRedirect(allow_private))
+    handlers = [_GuardedRedirect(allow_private)]
+    if not allow_private:
+        handlers += [_PinnedHTTPHandler(), _PinnedHTTPSHandler()]
+    opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, headers={"User-Agent": f"OpenWebUI-MapVisualizer/{_MV_BUILD}", "Accept": "*/*"})
     with opener.open(req, timeout=timeout) as resp:
         data = resp.read(max_bytes + 1)
@@ -1927,6 +2396,8 @@ class Tools:
         maplibre_js_url: str = Field(default="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js", description="MapLibre GL JS UMD build (5.x). Point at /static/... to self-host.")
         maplibre_css_url: str = Field(default="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css", description="MapLibre GL CSS.")
         pmtiles_js_url: str = Field(default="https://unpkg.com/pmtiles@4.4.1/dist/pmtiles.js", description="PMTiles UMD build, loaded only when a map uses PMTiles.")
+        terra_draw_js_url: str = Field(default="https://unpkg.com/terra-draw@1.35.0/dist/terra-draw.umd.js", description="Terra Draw UMD build for the feature editor, loaded only when a user edits or draws.")
+        terra_draw_adapter_js_url: str = Field(default="https://unpkg.com/terra-draw-maplibre-gl-adapter@1.4.1/dist/terra-draw-maplibre-gl-adapter.umd.js", description="Terra Draw MapLibre adapter (UMD).")
         titiler_endpoint: str = Field(default="https://titiler.xyz", description="TiTiler endpoint used to tile Cloud Optimized GeoTIFFs (cog layers).")
         terrain_tiles: str = Field(default=TERRAIN_TILES, description="Terrarium-encoded elevation tiles for 3D terrain.")
         glyphs_url: str = Field(default=GLYPHS_URL, description="Glyph (font) URL used for labels on raster basemaps.")
@@ -1942,12 +2413,14 @@ class Tools:
 
     async def show_map(
         self,
+        # typed element lists matter: Open WebUI turns a bare `list` into an array of strings,
+        # which makes models stringify the layer objects and coordinates
         title: str = "Map",
-        layers: Optional[list] = None,
+        layers: Optional[list[dict]] = None,
         basemap: Optional[str] = None,
-        center: Optional[list] = None,
+        center: Optional[list[float]] = None,
         zoom: Optional[float] = None,
-        bounds: Optional[list] = None,
+        bounds: Optional[list[float]] = None,
         pitch: Optional[float] = None,
         bearing: Optional[float] = None,
         globe: bool = False,
@@ -2025,6 +2498,9 @@ class Tools:
         summary = _summarise(spec, warnings, rejected)
         if __event_emitter__:
             await __event_emitter__({"type": "embeds", "data": {"embeds": [html]}})
+            n = len(spec["layers"])
+            note = f"Map: {n} layer{'s' if n != 1 else ''}" + (f", {len(rejected)} rejected" if rejected else "")
+            await __event_emitter__({"type": "status", "data": {"description": note, "done": True}})
             return summary
         return HTMLResponse(content=html, headers={"Content-Disposition": "inline"}), summary
 
@@ -2034,6 +2510,7 @@ class Tools:
         service: Literal["auto", "wms", "wfs", "wmts", "ogcapi"] = "auto",
         search: str = "",
         limit: int = 60,
+        __event_emitter__=None,
     ) -> str:
         """
         Read a web map service's capabilities so you can use real layer names in show_map.
@@ -2048,9 +2525,19 @@ class Tools:
         :param limit: Maximum number of layers to return.
         :return: JSON summary of the service.
         """
+        async def status(text: str, done: bool = False):
+            if __event_emitter__:
+                await __event_emitter__({"type": "status", "data": {"description": text, "done": done}})
+
+        result = await self._inspect(url, service, search, limit, status)
+        await status("Read service capabilities" if '"error"' not in result[:12] else "Could not read the service", True)
+        return result
+
+    async def _inspect(self, url, service, search, limit, status) -> str:
         allow = self.valves.allow_private_networks
         timeout = self.valves.request_timeout
         limit = max(1, min(int(limit or 60), 300))
+        host = urllib.parse.urlsplit(url).hostname or url
         if self.valves.network_policy == "allowlist" and not _host_allowed(url, _host_patterns(self.valves.allowed_hosts)):
             return json.dumps({"error": f"Host {urllib.parse.urlsplit(url).hostname} is not on the admin allowlist."})
 
@@ -2072,6 +2559,7 @@ class Tools:
 
         errors = []
         for svc in order:
+            await status(f"Reading {'OGC API' if svc == 'ogcapi' else svc.upper()} capabilities from {host}…")
             try:
                 if svc == "ogcapi":
                     base = url.split("?")[0].rstrip("/")

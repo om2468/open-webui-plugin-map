@@ -578,7 +578,9 @@ def test_show_map_with_emitter():
 
     result = run(Tools().show_map(title="My <Map>", layers=LAYERS, basemap="bogus", __event_emitter__=emitter))
     assert isinstance(result, str)
-    assert len(events) == 1
+    # the embed, then a status line for the chat
+    assert [e["type"] for e in events] == ["embeds", "status"]
+    assert events[1]["data"] == {"description": "Map: 2 layers, 2 rejected", "done": True}
     ev = events[0]
     assert ev["type"] == "embeds"
     assert list(ev["data"].keys()) == ["embeds"] and len(ev["data"]["embeds"]) == 1

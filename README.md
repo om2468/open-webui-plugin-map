@@ -1,6 +1,6 @@
 # Map Visualizer for Open WebUI
 
-Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, opacity and style controls, a basemap gallery, click-to-identify popups, open building footprints, 3D terrain, a globe view, PNG export and a pop-out window.
+Interactive [MapLibre GL](https://maplibre.org/) maps, rendered inline in Open WebUI chats. The model describes the map as a JSON layer spec; the tool draws it on a keyless basemap with a layer panel, a basemap gallery, click-to-identify popups, open building footprints, 3D terrain, a globe view, PNG export and a pop-out window. Users can then reorder, restyle and label layers, edit features and their attributes, and send the result back to the model.
 
 No API keys are needed. The default basemap is OpenStreetMap.
 
@@ -9,9 +9,10 @@ No API keys are needed. The default basemap is OpenStreetMap.
 | Feature | Detail |
 | --- | --- |
 | Many layer types | XYZ tiles, WMS, WMTS, WFS, OGC API Features, GeoJSON, vector tiles, PMTiles, Cloud Optimized GeoTIFF, georeferenced images, building footprints |
-| Layer panel | Show or hide, opacity, zoom to layer, legends (generated or from WMS `GetLegendGraphic`), per-layer error messages |
+| Layer panel | Show or hide, opacity, drag to reorder, zoom to layer, legends (generated or from WMS `GetLegendGraphic`), per-layer error messages |
 | Vector styling | The model sets colour, outline, labels, extrusion, filters, and `colorBy` classification (graduated or categorical) with automatic legend |
-| Style editor | Users can change a layer's colour, outline colour, line width and point size in the panel (the sliders button on each layer) |
+| Style editor | Users can change a vector layer's colour, outline, line width, point size and labels (attribute, text size, colour) in the panel. Only the controls that fit the layer's geometry are shown. Server-styled layers (WMS, WMTS, XYZ, COG, images) offer opacity only |
+| Feature editing | Edit features of GeoJSON, WFS and OGC API layers (move, reshape, add, delete points, lines, polygons, rectangles, circles) and their attributes, or draw a new sketch layer with the pencil button. Download the result as GeoJSON, or **Send to chat** to put it in your message box for the AI. Uses [Terra Draw](https://github.com/JamesLMilner/terra-draw), loaded only when you edit |
 | Building footprints | Open data, no keys: OpenStreetMap buildings (OpenFreeMap) or [Overture Maps](https://overturemaps.org/) buildings (latest release, found automatically), as flat 2D footprints or extruded 3D |
 | Click to identify | Feature attributes for vector layers, `GetFeatureInfo` for WMS layers |
 | Basemaps | 23 keyless options (OpenStreetMap, Esri, OpenFreeMap, USGS, NASA GIBS, PDOK) or any XYZ template or MapLibre style URL |
@@ -30,6 +31,27 @@ No API keys are needed. The default basemap is OpenStreetMap.
 Native (function) calling works and is recommended, because the layer spec is passed as a structured argument. Models need to be reasonably good at tool calls and JSON; small models tend to guess layer names, which `inspect_ogc_service` is there to prevent.
 
 No Same-Origin setting is required. If you turn on **iframe Sandbox Allow Same Origin** (Settings, then Interface), the map can read Open WebUI's theme and follows its dark or light mode. Without it the map follows your operating system's setting instead.
+
+To update, paste the new `tool.py` over the old one and save. The version is in the file header.
+
+## Using the map panel
+
+The model builds the map; the panel lets you adjust it without another prompt.
+
+| Action | How |
+| --- | --- |
+| Show or hide | Tick box on the layer row |
+| Reorder | Drag a row by its grip handle (⋮⋮). The line shows whether it lands above or below. Top of the list draws on top |
+| Opacity | Click the layer name or its button. Raster layers (WMS, WMTS, XYZ, COG) show a half-filled circle and offer opacity only, since the server styles them |
+| Restyle | Vector layers show a sliders button: colour (replaces any `colorBy` scheme), outline, width, point size |
+| Label | Pick an attribute in **Label**, then set text size and colour. The picker appears only when the layer has attributes |
+| Edit features | **Edit features** opens an edit bar: Select, Point, Line, Polygon, Rectangle, Circle, Delete, Save, Cancel. Drag a selected feature to move it, or its vertices to reshape it |
+| Edit attributes | Draw or select a feature and an **Attributes** form appears top right. Change values, or type a name in **New attribute** and press Enter. Numbers and true/false values keep their type. Saved attributes become available to **Label** |
+| Sketch | The pencil button in the toolbar starts a new, empty sketch layer in polygon mode |
+| Download | **Download** saves the layer, with your edits, as a `.geojson` file |
+| Send to chat | **Send to chat** puts the layer's GeoJSON into your message box (coordinates rounded to 6 decimals, about 30,000 characters at most). Add your question and send; the model can reuse it as an inline `geojson` layer |
+
+Editing works for single Points, LineStrings and Polygons. Multi-part features (MultiPolygon and so on) are kept unchanged, and the edit bar says how many. Your order, visibility, opacity and edits survive the map being released off screen and the pop-out window. **Send to chat** is not offered in the pop-out, which is outside the chat.
 
 ## Layer types
 
@@ -109,6 +131,7 @@ Set by an admin under Workspace, then Tools, then the gear icon on Map Visualize
 | `maplibre_js_url` | `https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js` | MapLibre GL JS (5.x UMD build) |
 | `maplibre_css_url` | `https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css` | MapLibre GL CSS |
 | `pmtiles_js_url` | `https://unpkg.com/pmtiles@4.4.1/dist/pmtiles.js` | PMTiles library, loaded only for maps that use PMTiles |
+| `terra_draw_js_url`, `terra_draw_adapter_js_url` | `terra-draw@1.35.0` and `terra-draw-maplibre-gl-adapter@1.4.1` on unpkg | Feature editor, loaded only when someone edits or draws |
 | `titiler_endpoint` | `https://titiler.xyz` | TiTiler server used to tile COG layers |
 | `terrain_tiles` | AWS open Terrarium elevation tiles | Elevation tiles for 3D terrain |
 | `glyphs_url` | OpenFreeMap font PBFs | Glyphs (fonts) for labels on raster basemaps |
@@ -127,7 +150,7 @@ The map runs inside Open WebUI's sandboxed iframe with a Content Security Policy
 
 In both modes the page loads MapLibre from the URL in the valves, which is third-party code unless you self-host it (below).
 
-**`inspect_ogc_service` and SSRF.** This is the only part that makes requests from your server. It accepts only absolute http(s) URLs, resolves the host and refuses anything that is not a public address (loopback, link-local, private ranges), re-checks every redirect, and caps the response at 8 MB. Set `allow_private_networks` only if you need to inspect services on your internal network, and understand that this lets the model, and so anyone who can prompt it, make the Open WebUI server fetch internal URLs.
+**`inspect_ogc_service` and SSRF.** This is the only part that makes requests from your server. It accepts only absolute http(s) URLs, resolves the host and refuses anything that is not a public address (loopback, link-local, private ranges), connects to exactly the address it checked (so a DNS answer that changes between check and connect cannot redirect it to an internal host), re-checks every redirect, and caps the response at 8 MB. When the server reaches the internet through a proxy, the proxy resolves the host and only the up-front check applies. Set `allow_private_networks` only if you need to inspect services on your internal network, and understand that this lets the model, and so anyone who can prompt it, make the Open WebUI server fetch internal URLs.
 
 ### Self-hosting MapLibre (air-gapped installs)
 
@@ -139,6 +162,7 @@ In both modes the page loads MapLibre from the URL in the valves, which is third
    - `maplibre_js_url` to `/static/maplibre/maplibre-gl.js`
    - `maplibre_css_url` to `/static/maplibre/maplibre-gl.css`
    - `pmtiles_js_url` to `/static/maplibre/pmtiles.js`
+   - `terra_draw_js_url` and `terra_draw_adapter_js_url` to your copies of `terra-draw.umd.js` and `terra-draw-maplibre-gl-adapter.umd.js` (only if you want feature editing)
 4. Set `network_policy` to `allowlist` and list your internal tile, WMS and WFS hosts in `allowed_hosts`. Set `default_basemap` to your own tile URL or style URL, and point `glyphs_url`, `terrain_tiles` and `titiler_endpoint` at internal servers if you use labels, terrain or COGs.
 
 Relative URLs resolve against the Open WebUI origin.
@@ -193,9 +217,27 @@ This is the SSRF guard. Enable `allow_private_networks` only if you intend the t
 </details>
 
 <details>
+<summary>A map says "Loading map…" until I scroll to it, or reloads after I scroll back</summary>
+
+That is deliberate. Browsers allow only about 16 live WebGL maps per page, so each map starts when it first scrolls into view and is released after a minute off screen. When you scroll back it rebuilds at the same view and basemap, with your layer order, visibility, opacity and saved edits. Style and label changes made in the panel are not kept. An edit session that is still open is saved automatically when the map is released.
+</details>
+
+<details>
 <summary>The map is the wrong height or cut off</summary>
 
 Pass `height` (240 to 1200) or change `default_height`. Narrow chat windows collapse the layer panel automatically; click its header to open it.
+</details>
+
+<details>
+<summary>"Could not load the feature editor"</summary>
+
+The browser could not fetch Terra Draw from `terra_draw_js_url`. Check that `unpkg.com` is reachable from the browser, or self-host both Terra Draw files and set the two valves.
+</details>
+
+<details>
+<summary>Send to chat does nothing</summary>
+
+It fills the message box of the chat the map belongs to, so it only works in the chat itself, not in the pop-out window. Older Open WebUI versions may ignore the request; use **Download** instead and attach the file.
 </details>
 
 ## Example prompts
@@ -210,6 +252,19 @@ Pass `height` (240 to 1200) or change `default_height`. Narrow chat windows coll
 - "Show this Cloud Optimized GeoTIFF with a viridis colour map, rescaled 0 to 255: `<url>`"
 
 Complete, tested `show_map` arguments are in [`examples/`](examples/).
+
+## Changelog
+
+**0.2.0**
+- Feature editing with Terra Draw: move, reshape, add and delete features, plus a sketch layer from the toolbar.
+- Attribute form for the selected or newly drawn feature; new attributes become label options.
+- Download a layer as GeoJSON, or Send to chat to hand it to the model.
+- Drag-and-drop reordering with a grip handle and above/below drop indicator (replaces the Up and Down buttons).
+- Style editor shows only controls that fit the layer: raster layers get opacity only, and point size appears only for layers with points. The Label picker is hidden when there are no attributes.
+- Layer order and edits survive release off screen and the pop-out window.
+
+**0.1.0**
+- First release: layer types, keyless basemaps, building footprints, `inspect_ogc_service`, style editor, pop-out, lazy start and release of maps.
 
 ## Acknowledgements
 
